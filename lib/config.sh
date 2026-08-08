@@ -80,7 +80,38 @@ DAEMON_LABEL="com.cbx.worktree-sites.renew.${ZONE}"
 DAEMON_PLIST="/Library/LaunchDaemons/${DAEMON_LABEL}.plist"
 RENEW_SCRIPT="$CERT_DIR/renew.sh"
 
-# The host pattern this project claims inside the shared wildcard block. Flat by necessity: DNS and
-# TLS wildcards match exactly one label, so the project name is a SUFFIX on the worktree name, never
-# a extra label. This is also what gives the proxy something clean to match on.
-HOST_PATTERN="*-${PROJECT}.${ZONE}"
+
+# --- per-project behaviour knobs ------------------------------------------------------------------
+# These change what the binary WRITES for this project, without touching the zone-wide parts.
+
+# The host pattern this project claims. Defaults to the flat form; override only if a project needs
+# to answer on something else (a bare vanity name, say). Must still be ONE label under the zone.
+HOST_PATTERN="${CBX_HOST_PATTERN:-*-${PROJECT}.${ZONE}}"
+
+# How the proxy talks to this stack. DDEV terminates TLS on its own port, so https is the default;
+# a plain-http stack sets this to http and the transport block is omitted.
+UPSTREAM_SCHEME="${CBX_UPSTREAM_SCHEME:-https}"
+
+# Worktrees are seeded copies of a real site on a guessable public name. Kept on by default; turn it
+# off only for a project that is genuinely meant to be indexed.
+NOINDEX="${CBX_NOINDEX:-1}"
+
+# --- the zone registry ------------------------------------------------------------------------
+# CERT MANAGEMENT IS CENTRAL, PER ZONE — not per project. One certificate, one renewal timer, one
+# ACME account, shared by every project under the wildcard; a second project finds them already
+# there and registers itself rather than duplicating them. This file is what makes that visible, and
+# what lets `status` tell you who else is on the zone.
+ZONE_REGISTRY="$CERT_DIR/projects.tsv"
+
+zone_register() { # <project> <port> <host-pattern>
+	mkdir -p "$CERT_DIR" 2>/dev/null
+	touch "$ZONE_REGISTRY" 2>/dev/null
+	# Rewrite this project's row rather than appending, so a changed port does not leave two.
+	local tmp; tmp="$(mktemp)" || return 1
+	grep -v "^$1	" "$ZONE_REGISTRY" 2>/dev/null > "$tmp"
+	printf '%s\t%s\t%s\n' "$1" "$2" "$3" >> "$tmp"
+	sort -o "$tmp" "$tmp" && mv "$tmp" "$ZONE_REGISTRY"
+	chmod 644 "$ZONE_REGISTRY" 2>/dev/null
+}
+
+zone_projects() { [ -f "$ZONE_REGISTRY" ] && cut -f1 "$ZONE_REGISTRY" | tr '\n' ' '; }

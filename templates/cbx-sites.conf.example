@@ -40,3 +40,18 @@ CBX_ACME_EMAIL="you@example.com"
 #CBX_CADDYFILE="/usr/local/etc/caddy/Caddyfile"
 #CBX_CADDY_LABEL="com.caddyserver.caddy"
 #CBX_CADDY_PLIST="/Library/LaunchDaemons/com.caddyserver.caddy.plist"
+
+# --- behaviour knobs ------------------------------------------------------------------------------
+# These change what the binary writes FOR THIS PROJECT. The zone-wide parts — the certificate, the
+# ACME account and the renewal timer — are central and shared; a second project registers against
+# them rather than duplicating them.
+
+# The host pattern this project claims. Still one label under the zone.
+#CBX_HOST_PATTERN="*-myproject.dev.example.com"
+
+# How the proxy reaches this stack. DDEV terminates TLS on its own port, hence https.
+#CBX_UPSTREAM_SCHEME="https"
+
+# Worktrees are seeded copies of a real site on a guessable public name. Off only if this project is
+# genuinely meant to be indexed.
+#CBX_NOINDEX="1"

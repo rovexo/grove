@@ -106,7 +106,10 @@ cmd_status() {
 		bad "caddy site block missing — run: sudo vendor/bin/cbx-public-host install"
 	fi
 
-	[ -f "$DAEMON_PLIST" ] && ok "renewal timer installed" || bad "renewal timer missing (installed by \`install\`)"
+	local others; others="$(zone_projects)"
+	[ -n "$others" ] && printf '  %-14s %s\n' "on this zone" "$others"
+
+	[ -f "$DAEMON_PLIST" ] && ok "renewal timer installed (zone-wide)" || bad "renewal timer missing (installed by \`install\`)"
 
 	printf '\n  Try:  curl -sI https://wt2-cbx-joomla.%s/ | head -1\n\n' "$ZONE"
 }
@@ -209,11 +212,10 @@ cmd_install() {
 # here and no sudo. Adding a PROJECT adds a matcher above the default.
 $ZONE, *.$ZONE {
 	bind $ip
-	header X-Robots-Tag "noindex, nofollow, noarchive, nosnippet"
-
+$([ "$NOINDEX" = "1" ] && printf '\theader X-Robots-Tag "noindex, nofollow, noarchive, nosnippet"\n')
 	tls $CRT $KEY
 
-	reverse_proxy 127.0.0.1:$UPSTREAM_PORT {
+	reverse_proxy ${UPSTREAM_SCHEME}://127.0.0.1:$UPSTREAM_PORT {
 		# Both load-bearing: without Host the app builds links to 127.0.0.1, without
 		# X-Forwarded-Proto it emits http:// and redirect-loops.
 		header_up Host {host}
@@ -230,7 +232,16 @@ EOF
 		ok "wrote the $ZONE block (backup kept next to the Caddyfile)"
 	fi
 
-	install_renew_timer
+	# CENTRAL, PER ZONE: one certificate, one ACME account, one timer, shared by every project under
+	# the wildcard. A second project registers itself and finds the timer already running.
+	zone_register "$PROJECT" "$UPSTREAM_PORT" "$HOST_PATTERN"
+
+	if [ -f "$DAEMON_PLIST" ] && launchctl print "system/${DAEMON_LABEL}" >/dev/null 2>&1; then
+		ok "renewal timer for $ZONE already running (installed by another project on this zone)"
+	else
+		install_renew_timer
+	fi
+
 	apply_caddy "$changed"
 }
 
