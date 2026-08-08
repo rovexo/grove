@@ -1,0 +1,23 @@
+{
+    "name": "rovexo/cbx-worktree-sites",
+    "description": "Per-worktree dev sites on one shared container stack, published on real HTTPS subdomains behind a single wildcard certificate.",
+    "type": "library",
+    "license": "proprietary",
+    "keywords": ["ddev", "worktree", "wildcard-certificate", "lets-encrypt", "dns-01", "caddy", "dev-environment"],
+    "require": {
+        "php": ">=8.1"
+    },
+    "bin": [
+        "bin/cbx-public-host"
+    ],
+    "scripts": {
+        "post-install-cmd": "echo 'cbx-worktree-sites: run `vendor/bin/cbx-public-host status` — it names anything still missing.'",
+        "post-update-cmd": "echo 'cbx-worktree-sites: run `vendor/bin/cbx-public-host status`.'"
+    },
+    "extra": {
+        "cbx-worktree-sites": {
+            "config-file": ".cbx-sites.conf",
+            "note": "Everything project-specific lives in that file at the consuming project's root. The package itself contains no project names, zones or ports."
+        }
+    }
+}

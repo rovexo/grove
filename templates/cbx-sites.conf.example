@@ -1,0 +1,42 @@
+# cbx-worktree-sites — everything project-specific, in one file at the project root.
+#
+# Copy to .cbx-sites.conf and edit. Commit it: none of this is secret (the DNS token lives in the
+# gitignored secrets file named below, never here).
+#
+#   cp vendor/rovexo/cbx-worktree-sites/templates/cbx-sites.conf.example .cbx-sites.conf
+#   vendor/bin/cbx-public-host status
+
+# --- required -----------------------------------------------------------------------------------
+
+# This project's slug. It becomes the SUFFIX of every worktree hostname —
+# <worktree>-<project>.<zone> — because DNS and TLS wildcards match exactly one label, so the
+# project can never be its own label. It is also what the proxy matches on.
+CBX_PROJECT="myproject"
+
+# The public zone. One wildcard DNS record and one wildcard certificate cover every project and
+# every worktree under it, forever.
+CBX_ZONE="dev.example.com"
+
+# This project's stack port — the stable upstream the proxy forwards to. MUST be unique per project
+# on this machine (in DDEV: host_https_port in .ddev/config.local.yaml, which is gitignored).
+CBX_UPSTREAM_PORT="33543"
+
+# Registration/recovery contact for the ACME account.
+CBX_ACME_EMAIL="you@example.com"
+
+# --- optional -----------------------------------------------------------------------------------
+
+# ACME DNS-01 provider, as lego names it (cloudflare, route53, digitalocean, …).
+#CBX_DNS_PROVIDER="cloudflare"
+
+# The environment variable that provider reads its credential from, and the gitignored file the
+# value is looked up in. Defaults suit Cloudflare.
+#CBX_DNS_TOKEN_VAR="CLOUDFLARE_DNS_API_TOKEN"
+#CBX_SECRETS_FILE=".claude/secrets/credentials.env"
+
+# The machine's reverse proxy. THERE IS ONLY ONE — a second cannot bind the same address:443. If
+# another project already put one on this machine, point these at THAT one; `install` will claim a
+# host matcher inside its existing block for this zone rather than adding a competing block.
+#CBX_CADDYFILE="/usr/local/etc/caddy/Caddyfile"
+#CBX_CADDY_LABEL="com.caddyserver.caddy"
+#CBX_CADDY_PLIST="/Library/LaunchDaemons/com.caddyserver.caddy.plist"

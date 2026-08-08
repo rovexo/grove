@@ -1,0 +1,337 @@
+#!/usr/bin/env bash
+#
+# cbx-public-host — publish this project's dev sites on a real HTTPS zone.
+#
+#   status     what is in place and what is not                                    (no root)
+#   cert       issue or renew the zone's wildcard via DNS-01                       (no root)
+#   install    claim this project's host pattern in the proxy + renewal timer      (ONE sudo)
+#
+# Everything project-specific comes from .cbx-sites.conf at the project root; this file contains no
+# project names, zones or ports. See docs/PLAYBOOK.md for the design and the traps.
+#
+# Part of rovexo/cbx-worktree-sites.
+
+set -uo pipefail
+
+PKG_DIR="$(cd "$(dirname "$(readlink "${BASH_SOURCE[0]}" || printf '%s' "${BASH_SOURCE[0]}")")/.." && pwd)"
+# shellcheck source=../lib/config.sh
+. "$PKG_DIR/lib/config.sh"
+
+MAIN_ROOT="$PROJECT_ROOT"
+
+
+C_BOLD=$'\033[1m'; C_OFF=$'\033[0m'; C_GREEN=$'\033[32m'; C_RED=$'\033[31m'; C_YEL=$'\033[33m'
+ok()   { printf '  %s✓%s %s\n' "$C_GREEN" "$C_OFF" "$*"; }
+bad()  { printf '  %s✗%s %s\n' "$C_RED" "$C_OFF" "$*"; }
+warn() { printf '  %s!%s %s\n' "$C_YEL" "$C_OFF" "$*"; }
+die()  { printf '%serror:%s %s\n' "$C_RED" "$C_OFF" "$*" >&2; exit 1; }
+
+# The LAN address Caddy binds. Walk the active interfaces rather than assuming en0/en1 — a dock,
+# a USB adapter or Wi-Fi-vs-Ethernet all move it, and an EMPTY answer here is dangerous rather than
+# merely wrong: `bind` with no address makes Caddy listen on EVERY interface, which is the one thing
+# this design is careful not to do. Callers must treat empty as fatal.
+lan_ip() {
+	local i ip
+	for i in $(ifconfig -l 2>/dev/null); do
+		case "$i" in lo*|awdl*|llw*|utun*|bridge*|gif*|stf*) continue ;; esac
+		ip="$(ipconfig getifaddr "$i" 2>/dev/null)"
+		[ -n "$ip" ] && { printf '%s\n' "$ip"; return 0; }
+	done
+	return 1
+}
+
+# The address the Caddyfile was written with, so status can spot DHCP moving the machine underneath it.
+caddyfile_bound_ip() {
+	awk '/^'"${ZONE//./\\.}"'|^\*\.'"${ZONE//./\\.}"'/{f=1} f&&/^[[:space:]]*bind /{print $2; exit}' "$CADDYFILE" 2>/dev/null
+}
+
+# The Cloudflare token, from the gitignored secrets file. Never echoed, never committed.
+load_token() {
+	# The provider token, from the project's gitignored secrets file. Never echoed, never committed.
+	# The variable NAME is configurable because each ACME DNS provider reads its own
+	# (CLOUDFLARE_DNS_API_TOKEN, AWS_ACCESS_KEY_ID, DO_AUTH_TOKEN, …); lego picks it up from the
+	# environment, so all this has to do is export it under the right name.
+	local var value
+	var="${CBX_DNS_TOKEN_VAR:-CLOUDFLARE_DNS_API_TOKEN}"
+
+	[ -f "$SECRETS" ] || die "no secrets file at $SECRETS"
+
+	value="$(grep -E "^${var}=" "$SECRETS" | head -1 | cut -d= -f2- | tr -d "\"' ")"
+	[ -n "$value" ] || die "$var is not set in $SECRETS
+       Create a token scoped to the $ZONE zone and add:
+         $var=\"...\""
+
+	export "$var=$value"
+}
+
+cmd_status() {
+	printf '\n  %sPublic hosting — %s%s\n\n' "$C_BOLD" "$ZONE" "$C_OFF"
+
+	local ip; ip="$(lan_ip)"
+	printf '  %-14s %s\n' "LAN IP" "${ip:-unknown}"
+	printf '  %-14s %s\n' "Upstream" "127.0.0.1:${UPSTREAM_PORT}"
+
+	# DNS: the wildcard is the only record that matters.
+	if [ "$(dig +short A "probe-$$.${ZONE}" | head -1)" != "" ]; then
+		ok "DNS  *.${ZONE} resolves"
+	else
+		bad "DNS  *.${ZONE} does NOT resolve — add:  *.${ZONE}  A  <public IP>"
+	fi
+
+	# The pinned upstream port has to exist or Caddy proxies into nothing.
+	if grep -qs "host_https_port" "$MAIN_ROOT/.ddev/config.local.yaml" 2>/dev/null; then
+		ok "ddev  host_https_port pinned"
+	else
+		bad "ddev  host_https_port not pinned — add  host_https_port: \"${UPSTREAM_PORT}\"  to .ddev/config.local.yaml and restart"
+	fi
+
+	if [ -f "$CRT" ]; then
+		local end; end="$(openssl x509 -enddate -noout -in "$CRT" 2>/dev/null | cut -d= -f2)"
+		ok "cert  present, expires $end"
+	else
+		bad "cert  missing — run: vendor/bin/cbx-public-host cert"
+	fi
+
+	if grep -qs "$ZONE" "$CADDYFILE" 2>/dev/null; then
+		local bound; bound="$(caddyfile_bound_ip)"
+		if [ -n "$bound" ] && [ -n "$ip" ] && [ "$bound" != "$ip" ]; then
+			# DHCP moved the machine. Caddy is still bound to (or failing to bind) the old address
+			# and the router's forward points at it — a total outage that looks like a DNS problem.
+			bad "caddy bound to $bound but this machine is $ip — re-run: sudo vendor/bin/cbx-public-host install"
+			warn "give this machine a DHCP reservation so it stops moving"
+		else
+			ok "caddy site block present${bound:+, bound to $bound}"
+		fi
+	else
+		bad "caddy site block missing — run: sudo vendor/bin/cbx-public-host install"
+	fi
+
+	[ -f "$DAEMON_PLIST" ] && ok "renewal timer installed" || bad "renewal timer missing (installed by \`install\`)"
+
+	printf '\n  Try:  curl -sI https://wt2-cbx-joomla.%s/ | head -1\n\n' "$ZONE"
+}
+
+# Issue or renew — one command for both.
+#
+# lego 5 changed its CLI in two ways that matter: the flags belong to the SUBCOMMAND (`lego run
+# --email …`, not `lego --email … run`), and the separate `renew` command is gone — `run` is
+# documented as "Get or renew a certificate" and decides for itself, so this is safe to call from a
+# daily timer and is a no-op until renewal is actually due.
+cmd_cert() {
+	command -v lego >/dev/null || die "lego is not installed (brew install lego)"
+	load_token
+	mkdir -p "$LEGO_DIR" "$CERT_DIR/certs"
+
+	echo "==> lego run (issues, or renews when due)"
+	# --dns.resolvers is not optional here. lego verifies TXT propagation through the SYSTEM
+	# resolvers, and this machine's include an ISP IPv6 recursor ([2a0c:5a80:0:2::1]) that never
+	# returned the record — issuance then failed with "time limit exceeded" long after Cloudflare
+	# had published it. Asking public resolvers directly checks the same fact without depending on
+	# whatever DHCP handed us, which is what makes this safe to run unattended.
+	lego run \
+		--email "$ACME_EMAIL" \
+		--dns "$DNS_PROVIDER" \
+		--dns.resolvers "1.1.1.1:53,8.8.8.8:53" \
+		--accept-tos \
+		--path "$LEGO_DIR" \
+		--domains "*.${ZONE}" \
+		--domains "${ZONE}" || die "lego run failed"
+
+	# Copy to a stable path Caddy points at, so a renewal never needs a config change. Globbed
+	# rather than assuming lego's file naming for a wildcard (it writes `_.zone.crt`).
+	local crt key
+	crt="$(ls -1 "$LEGO_DIR"/certificates/*."${ZONE}".crt 2>/dev/null | head -1)"
+	key="$(ls -1 "$LEGO_DIR"/certificates/*."${ZONE}".key 2>/dev/null | head -1)"
+	[ -n "$crt" ] && [ -n "$key" ] || die "lego reported success but no certificate landed in $LEGO_DIR/certificates"
+
+	cp "$crt" "$CRT"
+	cp "$key" "$KEY"
+	chmod 644 "$CRT"; chmod 640 "$KEY"
+	ok "certificate at $CRT"
+}
+
+cmd_install() {
+	[ "$(id -u)" -eq 0 ] || die "run this one with sudo:  sudo vendor/bin/cbx-public-host install"
+	[ -f "$CRT" ] || die "no certificate yet — run (as yourself):  vendor/bin/cbx-public-host cert"
+	[ -f "$CADDYFILE" ] || die "no Caddyfile at $CADDYFILE"
+
+	local ip changed=0
+	ip="$(lan_ip)" || die "could not determine this machine's LAN address — refusing to write a config that would bind ALL interfaces"
+	[ -n "$ip" ] || die "could not determine this machine's LAN address — refusing to write a config that would bind ALL interfaces"
+
+	if grep -q "$HOST_PATTERN" "$CADDYFILE"; then
+		warn "$PROJECT already claims $HOST_PATTERN — leaving the Caddyfile alone"
+	elif grep -qE "^[^#]*\*\.${ZONE//./\\.}" "$CADDYFILE"; then
+		# ANOTHER PROJECT ALREADY OWNS THIS ZONE'S BLOCK. Caddy refuses two site blocks claiming the
+		# same wildcard, and a zone per project throws away the reason for having a wildcard — so this
+		# project claims a host MATCHER inside the existing block instead. Inserted after the `tls`
+		# line, which is a stable anchor, and before the block's default reverse_proxy so the more
+		# specific match wins.
+		cp "$CADDYFILE" "${CADDYFILE}.bak-$(date +%Y%m%d-%H%M%S)"
+		awk -v pat="$HOST_PATTERN" -v port="$UPSTREAM_PORT" -v proj="$PROJECT" '
+			{ print }
+			!done && /^[[:space:]]*tls / {
+				print ""
+				print "\t# " proj " — added by cbx-worktree-sites"
+				print "\t@" proj " host " pat
+				print "\treverse_proxy @" proj " 127.0.0.1:" port " {"
+				print "\t\theader_up Host {host}"
+				print "\t\theader_up X-Forwarded-Proto https"
+				print "\t\ttransport http { tls tls_insecure_skip_verify }"
+				print "\t}"
+				done = 1
+			}
+		' "${CADDYFILE}.bak-"* >/dev/null 2>&1 || true
+		awk -v pat="$HOST_PATTERN" -v port="$UPSTREAM_PORT" -v proj="$PROJECT" '
+			{ print }
+			!done && /^[[:space:]]*tls / {
+				print ""
+				print "\t# " proj " — added by cbx-worktree-sites"
+				print "\t@" proj " host " pat
+				print "\treverse_proxy @" proj " 127.0.0.1:" port " {"
+				print "\t\theader_up Host {host}"
+				print "\t\theader_up X-Forwarded-Proto https"
+				print "\t\ttransport http { tls tls_insecure_skip_verify }"
+				print "\t}"
+				done = 1
+			}
+		' "$CADDYFILE" > "${CADDYFILE}.new" && mv "${CADDYFILE}.new" "$CADDYFILE"
+		changed=1
+		ok "claimed $HOST_PATTERN inside the existing $ZONE block"
+	else
+		# First project in this zone: write the whole block, with this project as the default upstream.
+		cp "$CADDYFILE" "${CADDYFILE}.bak-$(date +%Y%m%d-%H%M%S)" 2>/dev/null || true
+		cat >>"$CADDYFILE" <<EOF
+
+# ---------------------------------------------------------------------------------------------
+# $ZONE — added by cbx-worktree-sites for $PROJECT. Every name under the zone is proxied to a
+# project's stack; each stack's web server routes by Host, so adding a WORKTREE needs no change
+# here and no sudo. Adding a PROJECT adds a matcher above the default.
+$ZONE, *.$ZONE {
+	bind $ip
+	header X-Robots-Tag "noindex, nofollow, noarchive, nosnippet"
+
+	tls $CRT $KEY
+
+	reverse_proxy 127.0.0.1:$UPSTREAM_PORT {
+		# Both load-bearing: without Host the app builds links to 127.0.0.1, without
+		# X-Forwarded-Proto it emits http:// and redirect-loops.
+		header_up Host {host}
+		header_up X-Forwarded-Proto https
+
+		transport http {
+			tls
+			tls_insecure_skip_verify
+		}
+	}
+}
+EOF
+		changed=1
+		ok "wrote the $ZONE block (backup kept next to the Caddyfile)"
+	fi
+
+	install_renew_timer
+	apply_caddy "$changed"
+}
+
+# Installs (or refreshes) the daily renewal timer. Root.
+install_renew_timer() {
+	# The renewal script + a daily LaunchDaemon. Root, because reloading Caddy is root's job.
+	cat >"$RENEW_SCRIPT" <<EOF
+#!/bin/bash
+# Installed by cbx-joomla/vendor/bin/cbx-public-host. Renews the ${ZONE} wildcard and applies it.
+#
+# Absolute paths throughout: a LaunchDaemon gets a minimal PATH, so bare \`caddy\`/\`launchctl\`
+# are not on it.
+#
+# And it RESTARTS Caddy rather than reloading it — this Caddy runs with \`admin off\`, so
+# \`caddy reload\` dies on "connection refused". Getting that wrong is the worst kind of bug here:
+# renewal would fetch a fresh certificate every 90 days and silently never serve it, surfacing as
+# an expired-certificate outage months later.
+set -uo pipefail
+LOG="$CERT_DIR/renew.log"
+echo "=== \$(date '+%F %T') renew run ===" >>"\$LOG"
+
+BEFORE=\$(/usr/bin/openssl x509 -noout -enddate -in "$CRT" 2>/dev/null || echo none)
+# CBX_PUBLIC_HOST_USER is passed explicitly: this is root running sudo, so SUDO_USER inside the
+# child is "root", and anything inferring the user from it would write the renewed certificate
+# into /var/root while Caddy went on serving the old path.
+/usr/bin/sudo -u "${REAL_USER}" CBX_PUBLIC_HOST_USER="${REAL_USER}" "$MAIN_ROOT/vendor/bin/cbx-public-host" cert >>"\$LOG" 2>&1
+AFTER=\$(/usr/bin/openssl x509 -noout -enddate -in "$CRT" 2>/dev/null || echo none)
+
+# Only bounce Caddy when the certificate actually changed — a daily no-op must not restart the
+# machine's only TLS front end (and every other project on it) 365 times a year.
+if [ "\$BEFORE" != "\$AFTER" ]; then
+	echo "certificate changed (\$BEFORE -> \$AFTER); restarting Caddy" >>"\$LOG"
+	/bin/launchctl bootout "system/${CADDY_LABEL}" >>"\$LOG" 2>&1 || true
+	waited=0
+	while /bin/launchctl print "system/${CADDY_LABEL}" >/dev/null 2>&1 && [ "\$waited" -lt 30 ]; do
+		sleep 1; waited=\$((waited + 1))
+	done
+	/bin/launchctl bootstrap system "$CADDY_PLIST" >>"\$LOG" 2>&1 || true
+else
+	echo "certificate unchanged; nothing to apply" >>"\$LOG"
+fi
+EOF
+	chmod 755 "$RENEW_SCRIPT"
+
+	cat >"$DAEMON_PLIST" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>${DAEMON_LABEL}</string>
+  <key>ProgramArguments</key><array><string>${RENEW_SCRIPT}</string></array>
+  <key>StartCalendarInterval</key><dict><key>Hour</key><integer>4</integer><key>Minute</key><integer>17</integer></dict>
+  <key>RunAtLoad</key><false/>
+</dict></plist>
+EOF
+	launchctl bootout system "$DAEMON_PLIST" 2>/dev/null || true
+	launchctl bootstrap system "$DAEMON_PLIST" || warn "launchctl bootstrap failed — load it by hand"
+	ok "daily renewal timer installed (${DAEMON_LABEL})"
+
+	# NOT `caddy reload`. That posts to the admin API, and this Caddy runs with `admin off` — the
+	# reload dies on "connect: connection refused" while the new config sits unapplied on disk.
+	# The daemon has to be restarted instead, which is what a proxy with `admin off` requires.
+}
+
+# Validate, then apply — but only bounce the proxy when its config actually changed. A daily or
+# repeated run must not take the machine's only TLS front end, and every other project with it,
+# down for nothing.
+apply_caddy() {
+	local changed="${1:-1}"
+	caddy validate --config "$CADDYFILE" --adapter caddyfile >/dev/null 2>&1 \
+		|| die "Caddy rejected the config — restore the backup next to $CADDYFILE"
+	ok "configuration valid"
+
+	# Only bounce Caddy when its config actually changed. Re-running install to refresh the renewal
+	# script must not take the machine's only TLS front end — and every other project on it — down.
+	if [ "$changed" -eq 0 ]; then
+		ok "Caddy config unchanged — not restarting"
+		return 0
+	fi
+
+	if launchctl print "system/${CADDY_LABEL}" >/dev/null 2>&1; then
+		launchctl bootout "system/${CADDY_LABEL}" 2>/dev/null || true
+		# bootout returns before the job is gone; bootstrapping into that gap fails with
+		# "Bootstrap failed: 5: Input/output error" and leaves NOTHING running. Wait it out.
+		local waited=0
+		while launchctl print "system/${CADDY_LABEL}" >/dev/null 2>&1 && [ "$waited" -lt 30 ]; do
+			sleep 1; waited=$((waited + 1))
+		done
+	fi
+	launchctl bootstrap system "$CADDY_PLIST" 2>/dev/null || true
+
+	sleep 2
+	if launchctl print "system/${CADDY_LABEL}" >/dev/null 2>&1; then
+		ok "Caddy restarted — every project on it comes back with it"
+	else
+		die "Caddy did not come back. Restore the backup next to $CADDYFILE and bootstrap $CADDY_PLIST"
+	fi
+}
+
+case "${1:-status}" in
+	status)  cmd_status ;;
+	cert)    cmd_cert ;;
+	install) cmd_install ;;
+	*)       die "usage: public-host.sh [status|cert|install]" ;;
+esac
