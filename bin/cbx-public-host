@@ -162,39 +162,43 @@ cmd_install() {
 	ip="$(lan_ip)" || die "could not determine this machine's LAN address — refusing to write a config that would bind ALL interfaces"
 	[ -n "$ip" ] || die "could not determine this machine's LAN address — refusing to write a config that would bind ALL interfaces"
 
+	# Is this project ALREADY the zone's default upstream? That is the normal state for the first
+	# project on a zone: it owns the block and needs no matcher — a matcher is only required once a
+	# SECOND project joins. Getting this wrong inserted a redundant matcher, and into the wrong
+	# block at that.
+	local zone_default_port
+	zone_default_port="$(awk -v z="^${ZONE//./\\.}[ ,]" '
+		$0 ~ z {inz=1} inz && /^[[:space:]]*reverse_proxy [^@]/ {
+			if (match($0, /127\.0\.0\.1:[0-9]+/)) { print substr($0, RSTART+10, RLENGTH-10); exit }
+		}
+		inz && /^}/ {inz=0}
+	' "$CADDYFILE" 2>/dev/null)"
+
 	if grep -q "$HOST_PATTERN" "$CADDYFILE"; then
 		warn "$PROJECT already claims $HOST_PATTERN — leaving the Caddyfile alone"
-	elif grep -qE "^[^#]*\*\.${ZONE//./\\.}" "$CADDYFILE"; then
-		# ANOTHER PROJECT ALREADY OWNS THIS ZONE'S BLOCK. Caddy refuses two site blocks claiming the
-		# same wildcard, and a zone per project throws away the reason for having a wildcard — so this
-		# project claims a host MATCHER inside the existing block instead. Inserted after the `tls`
-		# line, which is a stable anchor, and before the block's default reverse_proxy so the more
-		# specific match wins.
+	elif [ "$zone_default_port" = "$UPSTREAM_PORT" ]; then
+		ok "$PROJECT is already the default upstream for $ZONE — no matcher needed"
+	elif grep -qE "^[^#]*\\*\\.${ZONE//./\\.}" "$CADDYFILE"; then
+		# ANOTHER PROJECT OWNS THIS ZONE'S BLOCK. Caddy refuses two blocks claiming the same
+		# wildcard, so claim a host matcher inside the existing one. Anchored on the ZONE's own tls
+		# line — anchoring on the first tls in the file put the matcher in a different project's
+		# block entirely.
 		cp "$CADDYFILE" "${CADDYFILE}.bak-$(date +%Y%m%d-%H%M%S)"
-		awk -v pat="$HOST_PATTERN" -v port="$UPSTREAM_PORT" -v proj="$PROJECT" '
+		awk -v z="^${ZONE//./\\.}[ ,]" -v pat="$HOST_PATTERN" -v port="$UPSTREAM_PORT" \
+		    -v proj="$PROJECT" -v scheme="$UPSTREAM_SCHEME" '
 			{ print }
-			!done && /^[[:space:]]*tls / {
+			$0 ~ z { inz = 1 }
+			inz && !done && /^[[:space:]]*tls / {
 				print ""
 				print "\t# " proj " — added by cbx-worktree-sites"
 				print "\t@" proj " host " pat
-				print "\treverse_proxy @" proj " 127.0.0.1:" port " {"
+				print "\treverse_proxy @" proj " " scheme "://127.0.0.1:" port " {"
 				print "\t\theader_up Host {host}"
 				print "\t\theader_up X-Forwarded-Proto https"
-				print "\t\ttransport http { tls tls_insecure_skip_verify }"
-				print "\t}"
-				done = 1
-			}
-		' "${CADDYFILE}.bak-"* >/dev/null 2>&1 || true
-		awk -v pat="$HOST_PATTERN" -v port="$UPSTREAM_PORT" -v proj="$PROJECT" '
-			{ print }
-			!done && /^[[:space:]]*tls / {
-				print ""
-				print "\t# " proj " — added by cbx-worktree-sites"
-				print "\t@" proj " host " pat
-				print "\treverse_proxy @" proj " 127.0.0.1:" port " {"
-				print "\t\theader_up Host {host}"
-				print "\t\theader_up X-Forwarded-Proto https"
-				print "\t\ttransport http { tls tls_insecure_skip_verify }"
+				print "\t\ttransport http {"
+				print "\t\t\ttls"
+				print "\t\t\ttls_insecure_skip_verify"
+				print "\t\t}"
 				print "\t}"
 				done = 1
 			}
