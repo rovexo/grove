@@ -72,6 +72,11 @@ so a config that does not parse never reaches the live proxy.
 
 ## Not yet packaged
 
-The worktree lifecycle itself — slot allocation, per-worktree database and vhost, the create/remove
-hooks — still lives in each project. `docs/PLAYBOOK.md` §4 Phase 1 describes it; folding it in behind
-a `cbx-worktree` binary is the obvious next step.
+The worktree lifecycle — slot allocation, per-worktree database and vhost, the create/remove hooks —
+still lives in each project, copy-pasted four times and already diverged.
+
+[`docs/CONCEPT-worktrees.md`](docs/CONCEPT-worktrees.md) is the design for absorbing it: every path
+declares *how* it exists in a worktree (`clone`, `empty`, `link`, `container`, `skip`) rather than
+appearing on one of two hardcoded lists, which turns Magento's "vendor copied container-side and
+excluded from file sync" from a special case into one word — and lets grove derive the sync-ignore
+list from it instead of having the same fact written down twice.
