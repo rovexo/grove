@@ -12,11 +12,11 @@ class Grove < Formula
   #
   # The hash is of what THIS url serves. The API tarball and the archive tarball are different bytes
   # for the same tag (0e116bd… against 0ef18904…), so the two are not interchangeable.
-  url "https://api.github.com/repos/rovexo/grove/tarball/v0.2.0",
+  url "https://api.github.com/repos/rovexo/grove/tarball/v0.2.1",
       headers: ["Authorization: Bearer #{ENV.fetch("HOMEBREW_GITHUB_API_TOKEN", "")}",
                 "Accept: application/vnd.github+json"]
-  sha256 "0e116bd3c54d7e58193ae0ed76350dce9b82f960719c7dfcec094f201d5004a3"
-  version "0.2.0"
+  sha256 "663ae4a386dbce63a75dc8829f98564de49b296eb725e39c5ef652e808b07ed2"
+  version "0.2.1"
   license "MIT"
 
   # System tools grove shells out to. Homebrew is the right packager precisely because it can
