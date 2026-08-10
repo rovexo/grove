@@ -1,8 +1,22 @@
 class Grove < Formula
   desc "Per-worktree dev sites on real public HTTPS subdomains behind one wildcard certificate"
   homepage "https://github.com/rovexo/grove"
-  url "https://github.com/rovexo/grove/archive/refs/tags/v0.2.0.tar.gz"
-  sha256 "0ef189047bf09fe0f923632e71b318a4c769279f8ff457d5148d8610ab94fca6"
+  # rovexo/grove is a PRIVATE repository, so this cannot be the plain
+  # github.com/.../archive/refs/tags/... URL: Homebrew does not send credentials to it and the
+  # download 404s. The API tarball endpoint does accept a token, and current Homebrew has dropped the
+  # GitHubPrivateRepository download strategies that used to handle this, so the header goes here.
+  #
+  # That means `brew install` needs HOMEBREW_GITHUB_API_TOKEN set to a token that can read the repo:
+  #   export HOMEBREW_GITHUB_API_TOKEN="$(gh auth token)"
+  # Making the repository public would remove this whole paragraph and the header with it.
+  #
+  # The hash is of what THIS url serves. The API tarball and the archive tarball are different bytes
+  # for the same tag (0e116bd… against 0ef18904…), so the two are not interchangeable.
+  url "https://api.github.com/repos/rovexo/grove/tarball/v0.2.0",
+      headers: ["Authorization: Bearer #{ENV.fetch("HOMEBREW_GITHUB_API_TOKEN", "")}",
+                "Accept: application/vnd.github+json"]
+  sha256 "0e116bd3c54d7e58193ae0ed76350dce9b82f960719c7dfcec094f201d5004a3"
+  version "0.2.0"
   license "MIT"
 
   # System tools grove shells out to. Homebrew is the right packager precisely because it can
