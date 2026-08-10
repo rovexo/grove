@@ -245,6 +245,14 @@ strands the **entire** worktree inside the container. The obvious cost is garbag
 stale copy at its URL, so the next session handed the same slot sees the previous session's files.
 grove purges the container-side directory on remove, and again on create for a reused slot.
 
+And the purge has to happen **before** the checkout, not after. The sync is bidirectional: deleting
+the container's copy of a path that exists on the host propagates that deletion straight back, so a
+purge run after `git worktree add` deletes the files git has just checked out. The same asymmetry
+makes the container-side copy itself conditional — it is only safe *because* the path is excluded
+from sync, so grove verifies that against the file it wrote rather than assuming it, and refuses the
+copy otherwise. On a bind-mounted stack there is no exclusion to be had at all: container-side and
+host-side are the same files, and an `rm -rf` in the container is an `rm -rf` on the host.
+
 **A generated file has to know the generator's rules.** ddev marks the files it owns with
 `#ddev-generated` and rewrites them on every restart, so the sync-exclusion this design depends on
 would have survived exactly until the next `ddev restart` — silently. grove takes ownership by

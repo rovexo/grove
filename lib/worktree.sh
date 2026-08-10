@@ -408,6 +408,20 @@ grove_db_drop() { # <name>
 
 # --- container-side work ----------------------------------------------------------------------------
 
+# Is this path genuinely excluded from the stack's file sync? Checked against the file grove itself
+# writes, so the answer is about what the stack is actually configured to do rather than what the
+# .grove.conf intended. A stack with no sync at all (a plain bind mount) answers no, correctly: there
+# the container and the host are the same files and nothing can be excluded from anything.
+grove_sync_excluded() { # <rel>
+	case "$STACK" in
+	ddev)
+		[ -f "$MAIN_ROOT/.ddev/mutagen/mutagen.yml" ] || return 1
+		grep -qF "\"/$WORKTREES_REL/*/$1\"" "$MAIN_ROOT/.ddev/mutagen/mutagen.yml" 2>/dev/null
+		;;
+	*) return 1 ;;
+	esac
+}
+
 # Delete a worktree's whole directory INSIDE the container.
 #
 # Removing the worktree host-side is not enough, and the reason is the `container` strategy itself:
@@ -443,6 +457,25 @@ grove_container_copies() { # <name>
 	cdir="$(grove_wt_container_dir "$wt")"
 	while IFS= read -r rel; do
 		[ -n "$rel" ] || continue
+
+		# THE COPY IS DESTRUCTIVE, AND ONLY SAFE BECAUSE THE PATH IS EXCLUDED FROM SYNC. The `rm -rf`
+		# below runs inside the container; if the path is still synced, that deletion propagates
+		# straight back to the host — the same mechanism that made an early version of this delete a
+		# freshly checked-out worktree. And where the project directory is bind-mounted rather than
+		# synced, container-side and host-side are the SAME FILES, so it deletes them outright.
+		#
+		# Both cases are ordinary: a project that ran `grove create` before `grove wire`, or added a
+		# `container` path without re-wiring. So the exclusion is verified rather than assumed, and a
+		# path that cannot be verified is skipped with an instruction rather than risked.
+		if ! grove_sync_excluded "$rel"; then
+			grove_log "REFUSING the container-side copy of $rel — it is not excluded from file sync"
+			printf 'grove: %s is declared `container` but is not excluded from file sync.\n' "$rel" >&2
+			printf '       Copying it container-side would propagate back to the host (or, on a\n' >&2
+			printf '       bind-mounted stack, delete the host files outright). Run: grove wire\n' >&2
+			all=1
+			continue
+		fi
+
 		# Cleared first rather than merged into: a slot can be reused, and `cp -a` over a previous
 		# session's tree would leave that session's files behind wherever the new one has none.
 		cmd="rm -rf '$cdir/$rel' && mkdir -p '$cdir/$rel' && cp -a '$CONTAINER_ROOT/$rel/.' '$cdir/$rel/' 2>/dev/null"
