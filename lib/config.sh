@@ -137,3 +137,31 @@ zone_register() { # <project> <port> <host-pattern>
 }
 
 zone_projects() { [ -f "$ZONE_REGISTRY" ] && cut -f1 "$ZONE_REGISTRY" | tr '\n' ' '; }
+
+# --- rootless mode ---------------------------------------------------------------------------
+# Site blocks in a directory YOU own, pulled into the machine's Caddyfile by one `import` line, and
+# applied through Caddy's admin API instead of a daemon restart. Between them those two facts remove
+# every root requirement from day-to-day use: adding a project, adding a worktree and renewing a
+# certificate all become ordinary file writes plus a localhost POST.
+#
+# It costs one root edit, once, ever — see `cbx-public-host status`, which prints it.
+SITES_DIR="${CBX_SITES_DIR:-$REAL_HOME/.config/cbx-worktree-sites/sites}"
+SITE_FILE="$SITES_DIR/${PROJECT}.caddy"
+ADMIN="${CBX_CADDY_ADMIN:-localhost:2019}"
+
+# Does the machine's Caddyfile pull in our directory?
+caddy_imports_sites() { grep -qsF "import $SITES_DIR/" "$CADDYFILE" 2>/dev/null; }
+
+# Is the admin API answering? Without it a reload means restarting the daemon, which needs root.
+caddy_admin_up() { curl -s -o /dev/null --max-time 2 "http://${ADMIN}/config/" 2>/dev/null; }
+
+# Rootless is available only when BOTH hold — otherwise fall back to the privileged path.
+rootless_ready() { caddy_imports_sites && caddy_admin_up; }
+
+# The one-time root change that switches this machine over.
+rootless_setup_hint() {
+	printf '  Add these two to %s (one sudo, once):\n\n' "$CADDYFILE"
+	printf '      {\n          admin %s      # replaces: admin off\n      }\n' "$ADMIN"
+	printf '      import %s/*.caddy\n\n' "$SITES_DIR"
+	printf '  Then reload once as root, and every change after that is unprivileged.\n'
+}

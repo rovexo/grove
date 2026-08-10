@@ -23,6 +23,31 @@ $EDITOR .cbx-sites.conf
 vendor/bin/cbx-public-host status      # names anything still missing
 ```
 
+## Rootless mode (recommended)
+
+Two lines in the machine's Caddyfile, added once with sudo, and **no operation ever needs root again**:
+
+```
+{
+    admin localhost:2019          # replaces: admin off
+}
+import ~/.config/cbx-worktree-sites/sites/*.caddy
+```
+
+Site blocks then live in a directory you own, and changes apply through Caddy's admin API — a POST to
+localhost — instead of a daemon restart. Those are the only two things that made root necessary.
+
+`status` reports which mode a machine is in and prints the change if it is still privileged. Without
+the setup, `install` falls back to editing the root Caddyfile, so existing machines keep working.
+
+Port 443 is untouched: the already-running root daemon still binds it, so URLs stay clean and moving
+the machine to another network costs one DNS record and no router rule.
+
+**The trade, stated plainly:** Caddy runs as root and now reads config you can write, and the admin
+API is unauthenticated on localhost. On a single-user machine both sit inside a boundary anything
+with write access to your home directory already crosses — but they are real, and the privileged mode
+is genuinely tighter.
+
 ## Use
 
 | | |

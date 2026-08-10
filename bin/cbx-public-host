@@ -135,7 +135,20 @@ cmd_status() {
 	local others; others="$(zone_projects)"
 	[ -n "$others" ] && printf '  %-14s %s\n' "on this zone" "$others"
 
+	if rootless_ready; then
+		ok "rootless — site blocks in $SITES_DIR, applied over the admin API"
+	elif caddy_imports_sites; then
+		bad "the import is in place but the admin API is off — reloads still need root"
+	else
+		bad "privileged mode — every change needs sudo"
+	fi
+
 	[ -f "$DAEMON_PLIST" ] && ok "renewal timer installed (zone-wide)" || bad "renewal timer missing (installed by \`install\`)"
+
+	if ! rootless_ready; then
+		printf '\n'
+		rootless_setup_hint
+	fi
 
 	printf '\n  Try:  curl -sI https://wt1-%s.%s/ | head -1\n\n' "$PROJECT" "$ZONE"
 }
@@ -179,8 +192,90 @@ cmd_cert() {
 	ok "certificate at $CRT"
 }
 
+# The unprivileged path: our own file in our own directory, then a reload over the admin API.
+#
+# Rollback is trivial and total here, which is why the pre-flight can be "write then check": the
+# ONLY thing that changed is one file we own, so removing it (or restoring its previous version)
+# puts the machine back exactly. And nothing has been applied yet — the running Caddy is untouched
+# until the reload at the end.
+cmd_install_rootless() {
+	local ip; ip="$(lan_ip)" || die "could not determine this machine's LAN address"
+	[ -n "$ip" ] || die "could not determine this machine's LAN address"
+
+	mkdir -p "$SITES_DIR" || die "could not create $SITES_DIR"
+
+	local had_before=0 backup=""
+	if [ -f "$SITE_FILE" ]; then
+		had_before=1
+		backup="$(mktemp)"; cp "$SITE_FILE" "$backup"
+	fi
+
+	# One project owns the zone's default upstream; the rest claim matchers. Whoever gets here first
+	# writes the block, and later projects add a matcher file of their own.
+	if [ "$(caddyfile_default_port)" = "$UPSTREAM_PORT" ] || [ -z "$(caddyfile_default_port)" ]; then
+		zone_block "$ip" > "$SITE_FILE"
+	else
+		matcher_snippet > "$SITE_FILE"
+	fi
+
+	if ! caddy adapt --config "$CADDYFILE" --adapter caddyfile >/dev/null 2>&1; then
+		if [ "$had_before" -eq 1 ]; then cp "$backup" "$SITE_FILE"; else rm -f "$SITE_FILE"; fi
+		rm -f "$backup"
+		die "the generated block does not parse — reverted, and nothing was applied"
+	fi
+	rm -f "$backup"
+	ok "wrote $SITE_FILE and the combined config parses"
+
+	zone_register "$PROJECT" "$UPSTREAM_PORT" "$HOST_PATTERN"
+
+	if caddy reload --config "$CADDYFILE" --adapter caddyfile >/dev/null 2>&1; then
+		ok "Caddy reloaded over the admin API — no root, no restart, no downtime"
+	else
+		warn "reload failed; the file is in place and will apply on the next reload"
+	fi
+
+	if [ -f "$DAEMON_PLIST" ] && launchctl print "system/${DAEMON_LABEL}" >/dev/null 2>&1; then
+		ok "renewal timer for $ZONE already running"
+	else
+		warn "renewal timer not installed — that one step still needs: sudo vendor/bin/cbx-public-host install-timer"
+	fi
+}
+
+# A standalone matcher block, for a project joining a zone another project already serves as the
+# default. Same shape the in-place editor inserts, but as its own importable file.
+matcher_snippet() {
+	cat <<EOF
+# $PROJECT — added by cbx-worktree-sites. Claims its hosts inside the $ZONE block.
+$HOST_PATTERN {
+	bind $(lan_ip)
+$([ "$NOINDEX" = "1" ] && printf '\theader X-Robots-Tag "noindex, nofollow, noarchive, nosnippet"\n')
+	tls $CRT $KEY
+
+	reverse_proxy ${UPSTREAM_SCHEME}://127.0.0.1:$UPSTREAM_PORT {
+		header_up Host {host}
+		header_up X-Forwarded-Proto https
+
+		transport http {
+			tls
+			tls_insecure_skip_verify
+		}
+	}
+}
+EOF
+}
+
 cmd_install() {
-	[ "$(id -u)" -eq 0 ] || die "run this one with sudo:  sudo vendor/bin/cbx-public-host install"
+	require_tools "caddy:brew install caddy" "curl:check your PATH"
+	[ -f "$CRT" ] || die "no certificate yet — run:  vendor/bin/cbx-public-host cert"
+
+	# Preferred: no root at all. Falls through to the privileged path on a machine that has not had
+	# the one-time setup, so nothing breaks for existing installs.
+	if rootless_ready; then
+		cmd_install_rootless
+		return
+	fi
+
+	[ "$(id -u)" -eq 0 ] || die "this machine still needs the privileged path — either run with sudo, or do the one-time setup that removes it (see: vendor/bin/cbx-public-host status)"
 	require_tools "caddy:brew install caddy" "awk:check your PATH" "launchctl:macOS only — no systemd support"
 	[ -f "$CRT" ] || die "no certificate yet — run (as yourself):  vendor/bin/cbx-public-host cert"
 
