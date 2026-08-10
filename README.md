@@ -1,4 +1,4 @@
-# cbx-worktree-sites
+# grove
 
 Per-worktree dev sites on one shared container stack, published on real HTTPS subdomains behind a
 single wildcard certificate.
@@ -15,50 +15,37 @@ the whole design, and `docs/PLAYBOOK.md` is why it works and where it bites.
 ## Install
 
 ```bash
-composer config repositories.cbx-worktree-sites path ../cbx-worktree-sites   # until it is published
-composer require rovexo/cbx-worktree-sites
-
-cp vendor/rovexo/cbx-worktree-sites/templates/cbx-sites.conf.example .cbx-sites.conf
-$EDITOR .cbx-sites.conf
-vendor/bin/cbx-public-host status      # names anything still missing
+brew install rovexo/tap/grove
+cd your-project
+cp "$(brew --prefix grove)/templates/grove.conf.example" .grove.conf
+$EDITOR .grove.conf
+grove status          # names anything still missing
 ```
 
-## Rootless mode (recommended)
+**Why Homebrew and not Composer or npm.** grove is a *machine-level* CLI, not a per-project library:
+one wildcard certificate and one proxy serve every project on the host, so installing a copy per
+repository is the wrong shape. Homebrew also expresses the real dependencies — `caddy` and `lego` are
+binaries, not packages in any language ecosystem — and puts a single command on `PATH` without
+dragging in a PHP or Node runtime that a bash tool has no use for.
 
-Two lines in the machine's Caddyfile, added once with sudo, and **no operation ever needs root again**:
+From a clone, for development:
 
+```bash
+git clone https://github.com/rovexo/grove ~/grove
+~/grove/bin/grove status
 ```
-{
-    admin localhost:2019          # replaces: admin off
-}
-import ~/.config/cbx-worktree-sites/sites/*.caddy
-```
-
-Site blocks then live in a directory you own, and changes apply through Caddy's admin API — a POST to
-localhost — instead of a daemon restart. Those are the only two things that made root necessary.
-
-`status` reports which mode a machine is in and prints the change if it is still privileged. Without
-the setup, `install` falls back to editing the root Caddyfile, so existing machines keep working.
-
-Port 443 is untouched: the already-running root daemon still binds it, so URLs stay clean and moving
-the machine to another network costs one DNS record and no router rule.
-
-**The trade, stated plainly:** Caddy runs as root and now reads config you can write, and the admin
-API is unauthenticated on localhost. On a single-user machine both sit inside a boundary anything
-with write access to your home directory already crosses — but they are real, and the privileged mode
-is genuinely tighter.
 
 ## Use
 
 | | |
 |---|---|
-| `cbx-public-host status` | what is in place and what is not. No root. |
-| `cbx-public-host cert` | issue or renew the zone's wildcard over DNS-01. No root. |
-| `sudo cbx-public-host install` | claim this project's hosts in the proxy + install the renewal timer. **One sudo, once.** |
+| `grove status` | what is in place and what is not. No root. |
+| `grove cert` | issue or renew the zone's wildcard over DNS-01. No root. |
+| `sudo grove install` | claim this project's hosts in the proxy + install the renewal timer. **One sudo, once.** |
 
 ## What is project-specific
 
-Nothing in this package. It is all in `.cbx-sites.conf` at the project root: the project slug, the
+Nothing in this package. It is all in `.grove.conf` at the project root: the project slug, the
 zone, this stack's upstream port, the ACME contact, and where the machine's proxy lives.
 
 ## Two rules worth knowing before you start
@@ -68,7 +55,7 @@ TLS wildcards match exactly one label, so the deep form is covered by neither th
 certificate.
 
 **There is one proxy per machine.** A second cannot bind the same address:443. If another project
-already has one, point `CBX_CADDYFILE`/`CBX_CADDY_LABEL` at it: `install` then claims a host matcher
+already has one, point `GROVE_CADDYFILE`/`GROVE_CADDY_LABEL` at it: `install` then claims a host matcher
 inside its existing block for the zone instead of adding a competing block.
 
 ## Requirements

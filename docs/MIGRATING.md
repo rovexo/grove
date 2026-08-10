@@ -4,7 +4,7 @@ Written from doing it to cbx-joomla, whose public hosting predated the package.
 
 ## The one that bites: two certificate stores
 
-The package keys its store by **zone** (`~/.local/share/cbx-worktree-sites/<zone>/`) because the
+The package keys its store by **zone** (`~/.local/share/grove/<zone>/`) because the
 certificate is shared by every project under the wildcard. A hand-rolled setup almost certainly keyed
 it by project. If you just run `cert`, you get a second certificate and a second ACME registration
 for a zone that already had one.
@@ -14,7 +14,7 @@ account, so copying it keeps renewals on the same registration and spends no Let
 
 ```bash
 OLD=~/.local/share/<old-name>
-NEW=~/.local/share/cbx-worktree-sites/<zone>
+NEW=~/.local/share/grove/<zone>
 mkdir -p "$NEW" && cp -a "$OLD/lego" "$OLD/certs" "$NEW/"
 <project>/tools/public-host.sh status        # → cert present, with its real expiry
 ```
@@ -46,7 +46,7 @@ and the matcher is only needed once a SECOND project joins the zone.
 ## What you should end up with
 
 ```
-vendor/bin/cbx-public-host status
+grove status
   ✓ DNS · ✓ port pinned · ✓ cert · ✓ caddy block · ✓ renewal timer (zone-wide)
   on this zone   <every project sharing the wildcard>
 ```

@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 #
-# Loads the consuming project's .cbx-sites.conf and derives everything else.
+# Loads the consuming project's .grove.conf and derives everything else.
 #
 # THE PACKAGE CONTAINS NO PROJECT NAMES, ZONES OR PORTS. Everything that differs between projects
 # lives in one file at the project root, which is what makes this installable rather than copied.
 #
-# Sourced by bin/cbx-public-host. Sets: PROJECT ZONE UPSTREAM_PORT ACME_EMAIL DNS_PROVIDER
+# Sourced by bin/grove. Sets: PROJECT ZONE UPSTREAM_PORT ACME_EMAIL DNS_PROVIDER
 # CADDYFILE CADDY_LABEL CADDY_PLIST SECRETS CERT_DIR LEGO_DIR CRT KEY DAEMON_LABEL DAEMON_PLIST
 # RENEW_SCRIPT REAL_USER REAL_HOME.
 
@@ -14,54 +14,54 @@
 # launchd plists and the address lookup is ipconfig/ifconfig. A Linux port means systemd units and
 # `ip -o -4 addr`; nothing else here would have to change.
 if [ "$(uname -s)" != "Darwin" ]; then
-	printf 'error: cbx-worktree-sites is macOS-only (launchd + ipconfig). Detected: %s\n' "$(uname -s)" >&2
+	printf 'error: grove is macOS-only (launchd + ipconfig). Detected: %s\n' "$(uname -s)" >&2
 	exit 1
 fi
 
 # --- where the project is -------------------------------------------------------------------------
-# Walk up from the caller until a .cbx-sites.conf turns up, so the tool works from any subdirectory
+# Walk up from the caller until a .grove.conf turns up, so the tool works from any subdirectory
 # (and from vendor/bin, which is a symlink into the package).
-cbx_find_project_root() {
+grove_find_project_root() {
 	local dir="${1:-$PWD}"
 	while [ "$dir" != "/" ]; do
-		[ -f "$dir/.cbx-sites.conf" ] && { printf '%s\n' "$dir"; return 0; }
+		[ -f "$dir/.grove.conf" ] && { printf '%s\n' "$dir"; return 0; }
 		dir="$(dirname "$dir")"
 	done
 	return 1
 }
 
-PROJECT_ROOT="$(cbx_find_project_root "${CBX_PROJECT_ROOT:-$PWD}")" || {
-	printf 'error: no .cbx-sites.conf found in this directory or any parent.\n' >&2
-	printf '       Copy the template:  cp vendor/rovexo/cbx-worktree-sites/templates/cbx-sites.conf.example .cbx-sites.conf\n' >&2
+PROJECT_ROOT="$(grove_find_project_root "${GROVE_PROJECT_ROOT:-$PWD}")" || {
+	printf 'error: no .grove.conf found in this directory or any parent.\n' >&2
+	printf '       Copy the template:  cp "$(brew --prefix grove)/templates/grove.conf.example" .grove.conf\n' >&2
 	exit 1
 }
 
 # shellcheck source=/dev/null
-. "$PROJECT_ROOT/.cbx-sites.conf"
+. "$PROJECT_ROOT/.grove.conf"
 
 # --- required ---------------------------------------------------------------------------------
-for _req in CBX_PROJECT CBX_ZONE CBX_UPSTREAM_PORT CBX_ACME_EMAIL; do
+for _req in GROVE_PROJECT GROVE_ZONE GROVE_UPSTREAM_PORT GROVE_ACME_EMAIL; do
 	if [ -z "$(eval "printf '%s' \"\${$_req:-}\"")" ]; then
-		printf 'error: %s is not set in %s/.cbx-sites.conf\n' "$_req" "$PROJECT_ROOT" >&2
+		printf 'error: %s is not set in %s/.grove.conf\n' "$_req" "$PROJECT_ROOT" >&2
 		exit 1
 	fi
 done
 unset _req
 
-PROJECT="$CBX_PROJECT"
-ZONE="$CBX_ZONE"
-UPSTREAM_PORT="$CBX_UPSTREAM_PORT"
-ACME_EMAIL="$CBX_ACME_EMAIL"
+PROJECT="$GROVE_PROJECT"
+ZONE="$GROVE_ZONE"
+UPSTREAM_PORT="$GROVE_UPSTREAM_PORT"
+ACME_EMAIL="$GROVE_ACME_EMAIL"
 
 # --- optional, with defaults --------------------------------------------------------------------
-DNS_PROVIDER="${CBX_DNS_PROVIDER:-cloudflare}"
-SECRETS="$PROJECT_ROOT/${CBX_SECRETS_FILE:-.claude/secrets/credentials.env}"
+DNS_PROVIDER="${GROVE_DNS_PROVIDER:-cloudflare}"
+SECRETS="$PROJECT_ROOT/${GROVE_SECRETS_FILE:-.claude/secrets/credentials.env}"
 
 # The machine's single reverse proxy. Defaulted, because on a machine that already has one the
 # correct answer is "the one that is already there" — see the multi-project note in the playbook.
-CADDYFILE="${CBX_CADDYFILE:-/usr/local/etc/caddy/Caddyfile}"
-CADDY_LABEL="${CBX_CADDY_LABEL:-com.caddyserver.caddy}"
-CADDY_PLIST="${CBX_CADDY_PLIST:-/Library/LaunchDaemons/${CADDY_LABEL}.plist}"
+CADDYFILE="${GROVE_CADDYFILE:-/usr/local/etc/caddy/Caddyfile}"
+CADDY_LABEL="${GROVE_CADDY_LABEL:-com.caddyserver.caddy}"
+CADDY_PLIST="${GROVE_CADDY_PLIST:-/Library/LaunchDaemons/${CADDY_LABEL}.plist}"
 
 # The port the zone block's DEFAULT reverse_proxy points at — i.e. which project owns the zone when
 # no matcher applies. Used by status (is this project routed at all?) and by install (is it already
@@ -81,7 +81,7 @@ caddyfile_default_port() {
 # via `sudo -u you`. In that last case sudo sets SUDO_USER to *root*, so the naive
 # ${SUDO_USER:-$(id -un)} would put the renewed certificate in /var/root while the proxy served the
 # old path — invisible until expiry. Trust SUDO_USER only when actually running as root.
-REAL_USER="${CBX_PUBLIC_HOST_USER:-}"
+REAL_USER="${GROVE_USER:-}"
 if [ -z "$REAL_USER" ]; then
 	if [ "$(id -u)" -eq 0 ] && [ -n "${SUDO_USER:-}" ] && [ "${SUDO_USER}" != "root" ]; then
 		REAL_USER="$SUDO_USER"
@@ -93,12 +93,12 @@ REAL_HOME="$(eval echo "~${REAL_USER}")"
 
 # One certificate store per ZONE, not per project — the whole point of the wildcard is that every
 # project under the zone shares it. A second project finds the certificate already issued.
-CERT_DIR="$REAL_HOME/.local/share/cbx-worktree-sites/$ZONE"
+CERT_DIR="$REAL_HOME/.local/share/grove/$ZONE"
 LEGO_DIR="$CERT_DIR/lego"
 CRT="$CERT_DIR/certs/_.${ZONE}.crt"
 KEY="$CERT_DIR/certs/_.${ZONE}.key"
 
-DAEMON_LABEL="com.cbx.worktree-sites.renew.${ZONE}"
+DAEMON_LABEL="dev.grove.renew.${ZONE}"
 DAEMON_PLIST="/Library/LaunchDaemons/${DAEMON_LABEL}.plist"
 RENEW_SCRIPT="$CERT_DIR/renew.sh"
 
@@ -108,15 +108,15 @@ RENEW_SCRIPT="$CERT_DIR/renew.sh"
 
 # The host pattern this project claims. Defaults to the flat form; override only if a project needs
 # to answer on something else (a bare vanity name, say). Must still be ONE label under the zone.
-HOST_PATTERN="${CBX_HOST_PATTERN:-*-${PROJECT}.${ZONE}}"
+HOST_PATTERN="${GROVE_HOST_PATTERN:-*-${PROJECT}.${ZONE}}"
 
 # How the proxy talks to this stack. DDEV terminates TLS on its own port, so https is the default;
 # a plain-http stack sets this to http and the transport block is omitted.
-UPSTREAM_SCHEME="${CBX_UPSTREAM_SCHEME:-https}"
+UPSTREAM_SCHEME="${GROVE_UPSTREAM_SCHEME:-https}"
 
 # Worktrees are seeded copies of a real site on a guessable public name. Kept on by default; turn it
 # off only for a project that is genuinely meant to be indexed.
-NOINDEX="${CBX_NOINDEX:-1}"
+NOINDEX="${GROVE_NOINDEX:-1}"
 
 # --- the zone registry ------------------------------------------------------------------------
 # CERT MANAGEMENT IS CENTRAL, PER ZONE — not per project. One certificate, one renewal timer, one
@@ -144,10 +144,10 @@ zone_projects() { [ -f "$ZONE_REGISTRY" ] && cut -f1 "$ZONE_REGISTRY" | tr '\n' 
 # every root requirement from day-to-day use: adding a project, adding a worktree and renewing a
 # certificate all become ordinary file writes plus a localhost POST.
 #
-# It costs one root edit, once, ever — see `cbx-public-host status`, which prints it.
-SITES_DIR="${CBX_SITES_DIR:-$REAL_HOME/.config/cbx-worktree-sites/sites}"
+# It costs one root edit, once, ever — see `grove status`, which prints it.
+SITES_DIR="${GROVE_SITES_DIR:-$REAL_HOME/.config/grove/sites}"
 SITE_FILE="$SITES_DIR/${PROJECT}.caddy"
-ADMIN="${CBX_CADDY_ADMIN:-localhost:2019}"
+ADMIN="${GROVE_CADDY_ADMIN:-localhost:2019}"
 
 # Does the machine's Caddyfile pull in our directory?
 caddy_imports_sites() { grep -qsF "import $SITES_DIR/" "$CADDYFILE" 2>/dev/null; }

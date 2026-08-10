@@ -1,0 +1,27 @@
+name: ci
+on: [push, pull_request]
+
+jobs:
+  shellcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck
+        run: shellcheck --severity=warning bin/grove lib/*.sh
+
+  smoke:
+    # macOS because grove refuses to run anywhere else — which is itself worth asserting.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: refuses without a config, and says which file is missing
+        run: |
+          out="$(bin/grove status 2>&1 || true)"
+          echo "$out"
+          echo "$out" | grep -q "grove.conf" || { echo "expected it to name the config file"; exit 1; }
+      - name: reports the required settings when the config is incomplete
+        run: |
+          printf 'GROVE_PROJECT="demo"\n' > .grove.conf
+          out="$(bin/grove status 2>&1 || true)"
+          echo "$out"
+          echo "$out" | grep -q "GROVE_ZONE" || { echo "expected it to name the missing setting"; exit 1; }
