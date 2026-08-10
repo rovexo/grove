@@ -55,3 +55,66 @@ GROVE_ACME_EMAIL="you@example.com"
 # Worktrees are seeded copies of a real site on a guessable public name. Off only if this project is
 # genuinely meant to be indexed.
 #GROVE_NOINDEX="1"
+
+# --- worktrees ------------------------------------------------------------------------------------
+# The second half: one isolated checkout, database and URL per session. Everything below has a
+# default, so a project that is happy with its platform's profile sets almost none of it.
+
+# Which platform profile to inherit: plain (default) | joomla | wordpress | magento2.
+# The profile is sourced BEFORE this file, so overriding it is plain assignment and extending it is
+# `+=`. Later wins, because that is what shell does — there are no merge rules to learn.
+#GROVE_PLATFORM="plain"
+
+# Where the served document root sits inside a checkout. Empty means the checkout root is the docroot.
+#GROVE_DOCROOT="docroot"
+
+# What runs the site. `none` is a first-class answer: worktrees, path strategies, branches and merges
+# all work without any container — there is simply no database to seed and no URL to hand out.
+#GROVE_STACK="ddev"
+
+# slots — worktrees are named wt1…wtN, so ONE static vhost serves them all and there is no
+#         per-worktree routing state. free — named after the session, which means no fixed hostname.
+#GROVE_NAMING="slots"
+#GROVE_SLOTS="5"
+
+# lazy — build the site on the first file change, because most sessions never load one and a
+#        dump-and-import on every session is the wrong default. eager — build it during create.
+#GROVE_PROVISION="lazy"
+
+# A submodule that must become a LINKED WORKTREE rather than a clone. A plain `git worktree add`
+# leaves it empty, and `git submodule update --init` clones from origin — which need not have the
+# pinned commit when submodule work is committed locally and pushed rarely.
+#GROVE_SUBMODULE="path/to/submodule"
+
+#GROVE_DB_SEED="clone"     # clone | empty | none
+#GROVE_DB_GRANT="shared"   # shared (the stack's own user) | own (per-worktree user)
+
+# EVERY PATH DECLARES HOW IT EXISTS, not whether it is copied:
+#
+#   clone      copy-on-write clone from the main checkout — big media, free on APFS
+#   empty      created, contents never copied — cache, tmp, logs. Inheriting another site's is
+#              worse than having none: its compiled paths, its locks, and worst of all its log
+#              entries, which send you debugging a problem that was never yours.
+#   link       relative symlink to the main checkout — node_modules and friends
+#   container  copied INSIDE the container and excluded from file sync — vendor/, generated/
+#   fresh      not created; a GROVE_POST_CREATE command produces it
+#   skip       not created at all
+#
+# Last entry per path wins, so overriding one line of a profile takes one line rather than restating
+# the list. grove derives the sync-ignore list from whichever paths say `container`, so the copy and
+# the exclusion cannot drift apart.
+#
+# grove also adds every path here to the repo's local git excludes: they hold each checkout's OWN
+# data, and a `git add -A` that swept one into a commit would overwrite another checkout's copy.
+#GROVE_PATHS+=(
+#    "docroot/images:clone"
+#    "docroot/cache:empty"
+#    "vendor:container"
+#    "node_modules:link"
+#)
+
+# Run inside the container after a worktree's site is built. Slow ones belong here rather than in
+# create — with GROVE_PROVISION="lazy" they are paid only by a session that actually works on files.
+#GROVE_POST_CREATE+=(
+#    "bin/magento setup:di:compile"
+#)

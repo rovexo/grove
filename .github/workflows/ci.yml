@@ -7,7 +7,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: shellcheck
-        run: shellcheck --severity=warning bin/grove lib/*.sh
+        run: shellcheck --severity=warning bin/grove lib/*.sh profiles/*.sh
 
   smoke:
     # macOS because grove refuses to run anywhere else — which is itself worth asserting.

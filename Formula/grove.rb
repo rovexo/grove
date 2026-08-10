@@ -16,7 +16,7 @@ class Grove < Formula
     # bin/ and lib/ are internals — libexec keeps them off PATH while the wrapper below points at
     # them. templates/ and docs/ are for humans, so they go where `brew --prefix grove` finds them:
     # the config hint tells people to copy from exactly that path, and it has to be true.
-    libexec.install "bin", "lib"
+    libexec.install "bin", "lib", "profiles"
     prefix.install "templates", "docs"
     # grove resolves lib/ from GROVE_PKG_DIR, so it works through Homebrew's symlink.
     (bin/"grove").write_env_script libexec/"bin/grove", GROVE_PKG_DIR: libexec

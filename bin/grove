@@ -1,13 +1,23 @@
 #!/usr/bin/env bash
 #
-# grove — publish this project's dev sites on a real HTTPS zone.
+# grove — per-worktree dev sites, and the public HTTPS zone they are served on.
 #
+# The public half — one wildcard per zone, one proxy block per project:
 #   status     what is in place and what is not                                    (no root)
 #   cert       issue or renew the zone's wildcard via DNS-01                       (no root)
 #   publish    claim this project's host pattern in the proxy + renewal timer      (ONE sudo)
 #
+# The worktree half — one isolated checkout, database and URL per session:
+#   create list info shell provision sync-db merge remove prune-merged wire
+#   hook create|remove|context|on-edit
+#
+# THE HOOKS ARE THE INTERFACE THAT MATTERS. An AI session never types `grove create`: Claude Code
+# fires a WorktreeCreate hook, and the session is moved into a worktree and has to be told where it
+# landed. The commands above are the human's copy of the same operations. See lib/hooks.sh.
+#
 # Everything project-specific comes from .grove.conf at the project root; this file contains no
-# project names, zones or ports. See docs/PLAYBOOK.md for the design and the traps.
+# project names, zones or ports. See docs/PLAYBOOK.md for the design and the traps, and
+# docs/CONCEPT-worktrees.md for why every path declares a strategy.
 #
 # Part of rovexo/grove.
 
@@ -18,20 +28,36 @@ set -uo pipefail
 case "${1:-}" in
 	-h|--help|help)
 		printf 'grove — per-worktree dev sites on real public HTTPS subdomains\n\n'
-		printf '  grove status    what is in place and what is not          (no root)\n'
-		printf '  grove cert      issue or renew the zone wildcard          (no root)\n'
-		printf '  grove publish   put this project on the zone              (root only until the\n'
-		printf '                  one-time setup that status prints)\n\n'
+		printf 'Public hosting\n'
+		printf '  grove status              what is in place and what is not      (no root)\n'
+		printf '  grove cert                issue or renew the zone wildcard      (no root)\n'
+		printf '  grove publish             put this project on the zone          (root only until\n'
+		printf '                            the one-time setup that status prints)\n\n'
+		printf 'Worktrees\n'
+		printf '  grove create <name>       branch + worktree + site. No sudo, no prompts.\n'
+		printf '  grove list                every worktree: branch, URL, database, idle time\n'
+		printf '  grove info <name>         paths, URL, database, commits still to land\n'
+		printf '  grove shell <name> [cmd]  run in that worktree, inside the container\n'
+		printf '  grove provision <name>    give a site-less worktree its site after the fact\n'
+		printf '  grove sync-db <name>      re-seed its database from the main one\n'
+		printf '  grove merge <name> [--keep]   land the work; release it unless --keep\n'
+		printf '  grove remove <name> [-f]  release without merging\n'
+		printf '  grove prune-merged        delete worktree branches whose commits have all landed\n'
+		printf '  grove wire                derive the vhost, hostnames and sync-ignore list\n\n'
+		printf 'Hook entry points (wired into .claude/settings.json by `grove wire`)\n'
+		printf '  grove hook create | remove | context | on-edit\n\n'
 		printf 'Reads .grove.conf from this directory or any parent.\n'
 		exit 0 ;;
-	-V|--version) printf 'grove 0.1.0\n'; exit 0 ;;
+	-V|--version) printf 'grove 0.2.0\n'; exit 0 ;;
 esac
 
 PKG_DIR="${GROVE_PKG_DIR:-$(cd "$(dirname "$(readlink "${BASH_SOURCE[0]}" || printf '%s' "${BASH_SOURCE[0]}")")/.." && pwd)}"
 # shellcheck source=../lib/config.sh
 . "$PKG_DIR/lib/config.sh"
-
-MAIN_ROOT="$PROJECT_ROOT"
+# shellcheck source=../lib/worktree.sh
+. "$PKG_DIR/lib/worktree.sh"     # also resolves MAIN_ROOT — the MAIN checkout, even from inside a worktree
+# shellcheck source=../lib/hooks.sh
+. "$PKG_DIR/lib/hooks.sh"
 
 
 C_BOLD=$'\033[1m'; C_OFF=$'\033[0m'; C_GREEN=$'\033[32m'; C_RED=$'\033[31m'; C_YEL=$'\033[33m'
@@ -92,6 +118,7 @@ require_tools() { # <tool:hint> ...
 }
 
 cmd_status() {
+	grove_require_public
 	require_tools "dig:part of bind-tools (brew install bind)" "openssl:check your PATH"
 
 	printf '\n  %sPublic hosting — %s%s\n\n' "$C_BOLD" "$ZONE" "$C_OFF"
@@ -174,6 +201,7 @@ cmd_status() {
 # documented as "Get or renew a certificate" and decides for itself, so this is safe to call from a
 # daily timer and is a no-op until renewal is actually due.
 cmd_cert() {
+	grove_require_public
 	require_tools "lego:brew install lego" "openssl:should be present on macOS; check your PATH"
 	load_token
 	mkdir -p "$LEGO_DIR" "$CERT_DIR/certs"
@@ -279,6 +307,7 @@ EOF
 }
 
 cmd_install() {
+	grove_require_public
 	require_tools "caddy:brew install caddy" "curl:check your PATH"
 	[ -f "$CRT" ] || die "no certificate yet — run:  grove cert"
 
@@ -539,9 +568,44 @@ apply_caddy() {
 	fi
 }
 
+need() { [ -n "${2:-}" ] || die "usage: grove $1 <worktree>  (grove list shows them)"; }
+
 case "${1:-status}" in
+	# --- the public half ---
 	status)          cmd_status ;;
 	cert)            cmd_cert ;;
 	publish|install) cmd_install ;;
-	*)       die "unknown command: $1 — try: grove status | cert | publish  (grove --help)" ;;
+
+	# --- the worktree half ---
+	create)
+		grove_create "${2:-manual}" "${3:-HEAD}" || die "could not create the worktree — see $GROVE_LOG_FILE"
+		ok "$GROVE_NEW_NAME on branch $GROVE_NEW_BRANCH"
+		printf '  %-10s %s\n' "path" "$GROVE_NEW_PATH"
+		[ -n "$GROVE_NEW_URL" ] && printf '  %-10s %s\n' "site" "$GROVE_NEW_URL"
+		[ -n "$GROVE_NEW_DB" ]  && printf '  %-10s %s\n' "database" "$GROVE_NEW_DB"
+		[ -f "$GROVE_NEW_PATH/.grove-provision-pending" ] && \
+			printf '  %-10s builds on the first file change (or: grove provision %s)\n' "site" "$GROVE_NEW_NAME"
+		;;
+	list|ls)         grove_list ;;
+	info)            need info "${2:-}"; grove_info "$2" ;;
+	shell)           need shell "${2:-}"; shift; name="$1"; shift; grove_shell "$name" "$@" ;;
+	provision)       need provision "${2:-}"; grove_provision "$2" ;;
+	sync-db|reseed)  need sync-db "${2:-}"; grove_sync_db "$2" ;;
+	merge)           need merge "${2:-}"; grove_merge "$2" "${3:-}" ;;
+	remove|rm)       need remove "${2:-}"; grove_remove "$2" "${3:-}" ;;
+	prune-merged)    grove_prune_merged ;;
+	wire)            grove_wire ;;
+
+	# --- the machine-facing half ---
+	hook)
+		case "${2:-}" in
+			create)  hook_create ;;
+			remove)  hook_remove ;;
+			context) hook_context ;;
+			on-edit) hook_on_edit ;;
+			*)       die "unknown hook: ${2:-<none>} — one of: create remove context on-edit" ;;
+		esac
+		;;
+
+	*)       die "unknown command: $1 — try: grove --help" ;;
 esac

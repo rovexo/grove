@@ -42,12 +42,13 @@ the sync to ignore it entirely, removes both the propagation and the ongoing wat
 
 ## 2. What a project file looks like
 
-`grove.conf` at the project root — **sourceable shell, no parser, no dependency**. Paths carry
+`.grove.conf` at the project root — **sourceable shell, no parser, no dependency**. The same file the
+public half already reads, grown a second half rather than gaining a sibling. Paths carry
 slashes so they cannot be variable names; a bash array of `path:strategy` pairs handles that without
 inventing a syntax.
 
 ```sh
-# grove.conf — cbx-magento
+# .grove.conf — cbx-magento (worktree half; the public half is in the same file)
 GROVE_PROJECT="cbx-magento"
 GROVE_ZONE="dev.rovexo.com"
 GROVE_UPSTREAM_PORT="33643"
@@ -169,7 +170,7 @@ The point of one declaration per path is that everything downstream follows from
 - **The sync ignore list** — every `container` path, written into `.ddev/mutagen/mutagen.yml`.
 - **The vhost** — from `docroot` + the profile's rewrite rules, one server block covering all slots.
 - **The FPM pool** — on-demand, so an idle worktree costs zero processes.
-- **The schema, user and grant** — from `database:`.
+- **The schema, user and grant** — from `GROVE_DB_SEED` and `GROVE_DB_GRANT`.
 - **The container-side copy commands** — `container` paths, executed after the stack is up.
 - **The hostnames** — `<name>-<project>.<zone>` publicly, already covered by the wildcard, plus the
   local one. Neither needs DNS or a certificate, which is what keeps `create` unprivileged.
@@ -195,9 +196,9 @@ the most bespoke behaviour to lose.
   can be a profile default for Magento rather than a per-project opt-in.
 - **`container` needs a source.** Copying from the main checkout's in-container path is fast and
   correct, but couples the worktree to whatever the main checkout had at that moment. `composer
-  install` in the worktree is correct and slow. Default to the copy; offer `container:fresh`.
+  install` in the worktree is correct and slow. Default to the copy; offer `vendor:fresh`.
 - **Post-create hooks make `create` slow again.** `di:compile` is minutes. It should respect
-  `provision: lazy` — deferred to first use, like the database already is.
+  `GROVE_PROVISION="lazy"` — deferred to first use, like the database already is.
 - ~~One config format, two consumers.~~ **Decided: shell.** `.grove.conf` grows the worktree keys
   rather than gaining a second file in another language. Arrays of `path:strategy` cover the one place
   nesting seemed necessary, and sourced profiles give inheritance for free.

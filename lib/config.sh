@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2034   # this file exists to SET variables; every reader is a different file
 #
 # Loads the consuming project's .grove.conf and derives everything else.
 #
@@ -7,7 +8,9 @@
 #
 # Sourced by bin/grove. Sets: PROJECT ZONE UPSTREAM_PORT ACME_EMAIL DNS_PROVIDER
 # CADDYFILE CADDY_LABEL CADDY_PLIST SECRETS CERT_DIR LEGO_DIR CRT KEY DAEMON_LABEL DAEMON_PLIST
-# RENEW_SCRIPT REAL_USER REAL_HOME.
+# RENEW_SCRIPT REAL_USER REAL_HOME — and the worktree half: PLATFORM DOCROOT WORKTREES_DIR NAMING
+# SLOTS PROVISION STACK SUBMODULE CONTAINER_ROOT LOCAL_ZONE DB_SEED DB_GRANT, plus the GROVE_PATHS
+# and GROVE_POST_CREATE arrays.
 
 # --- platform ------------------------------------------------------------------------------------
 # macOS only, and said out loud rather than discovered through a confusing failure: the daemons are
@@ -36,22 +39,58 @@ PROJECT_ROOT="$(grove_find_project_root "${GROVE_PROJECT_ROOT:-$PWD}")" || {
 	exit 1
 }
 
+# --- the platform profile, sourced BEFORE the project file ----------------------------------------
+# Profiles are ordinary shell files that ship with grove and set a platform's defaults. Sourcing one
+# first and the project's file second is the whole inheritance mechanism: overriding is plain
+# assignment, extending is `+=`, and LATER WINS because that is what shell does. There are no merge
+# semantics to specify and no precedence rules to document.
+#
+# Which profile to load is itself a setting in the project file, so it is read first — in a SUBSHELL,
+# so a config with a side effect in it does not run that side effect twice.
+GROVE_PLATFORM="$(. "$PROJECT_ROOT/.grove.conf" >/dev/null 2>&1; printf '%s' "${GROVE_PLATFORM:-plain}")"
+
+# Declared before anything appends to them: `GROVE_PATHS+=(…)` in a profile or a project file must
+# extend a real array, and `${#GROVE_PATHS[@]}` on a never-declared name is an error under `set -u`
+# in the bash 3.2 that macOS still ships.
+GROVE_PATHS=()
+GROVE_POST_CREATE=()
+
+if [ -n "${PKG_DIR:-}" ] && [ -f "$PKG_DIR/profiles/${GROVE_PLATFORM}.sh" ]; then
+	# shellcheck source=/dev/null
+	. "$PKG_DIR/profiles/${GROVE_PLATFORM}.sh"
+elif [ "$GROVE_PLATFORM" != "plain" ]; then
+	printf 'error: no profile named %s (looked in %s/profiles/)\n' "$GROVE_PLATFORM" "${PKG_DIR:-?}" >&2
+	printf '       shipped profiles: %s\n' "$(ls -1 "${PKG_DIR:-.}/profiles/" 2>/dev/null | sed 's/\.sh$//' | tr '\n' ' ')" >&2
+	exit 1
+fi
+
 # shellcheck source=/dev/null
 . "$PROJECT_ROOT/.grove.conf"
 
 # --- required ---------------------------------------------------------------------------------
-for _req in GROVE_PROJECT GROVE_ZONE GROVE_UPSTREAM_PORT GROVE_ACME_EMAIL; do
-	if [ -z "$(eval "printf '%s' \"\${$_req:-}\"")" ]; then
-		printf 'error: %s is not set in %s/.grove.conf\n' "$_req" "$PROJECT_ROOT" >&2
-		exit 1
-	fi
-done
-unset _req
+# Only the project's own name is required unconditionally. The public half (zone, port, ACME email)
+# is checked by grove_require_public, called by the commands that actually need it — a project that
+# uses grove ONLY for worktrees on a local stack has no zone and should not be made to invent one.
+if [ -z "${GROVE_PROJECT:-}" ]; then
+	printf 'error: GROVE_PROJECT is not set in %s/.grove.conf\n' "$PROJECT_ROOT" >&2
+	exit 1
+fi
 
 PROJECT="$GROVE_PROJECT"
-ZONE="$GROVE_ZONE"
-UPSTREAM_PORT="$GROVE_UPSTREAM_PORT"
-ACME_EMAIL="$GROVE_ACME_EMAIL"
+ZONE="${GROVE_ZONE:-}"
+UPSTREAM_PORT="${GROVE_UPSTREAM_PORT:-}"
+ACME_EMAIL="${GROVE_ACME_EMAIL:-}"
+
+grove_require_public() {
+	local _req _missing=0
+	for _req in GROVE_ZONE GROVE_UPSTREAM_PORT GROVE_ACME_EMAIL; do
+		if [ -z "$(eval "printf '%s' \"\${$_req:-}\"")" ]; then
+			printf 'error: %s is not set in %s/.grove.conf\n' "$_req" "$PROJECT_ROOT" >&2
+			_missing=1
+		fi
+	done
+	[ "$_missing" -eq 0 ] || exit 1
+}
 
 # --- optional, with defaults --------------------------------------------------------------------
 DNS_PROVIDER="${GROVE_DNS_PROVIDER:-cloudflare}"
@@ -157,6 +196,50 @@ caddy_admin_up() { curl -s -o /dev/null --max-time 2 "http://${ADMIN}/config/" 2
 
 # Rootless is available only when BOTH hold — otherwise fall back to the privileged path.
 rootless_ready() { caddy_imports_sites && caddy_admin_up; }
+
+# --- the worktree half --------------------------------------------------------------------------
+# Defaults for everything the worktree engine reads. A profile has already had its say by the time
+# this runs, and so has the project file, so every one of these is "what is left when neither said
+# anything".
+
+# Which platform profile was loaded. Kept as a plain name for messages and for `info`.
+PLATFORM="$GROVE_PLATFORM"
+
+# Where the served document root sits inside a checkout, relative to its root. Empty means the
+# checkout root IS the docroot, which is the common case outside PHP CMSes.
+DOCROOT="${GROVE_DOCROOT:-}"
+
+# Where worktrees are made. Inside the project on purpose: a stack that mounts the project directory
+# then sees every worktree without a second mount, which is what lets one container serve them all.
+WORKTREES_REL="${GROVE_WORKTREE_DIR:-.claude/worktrees}"
+
+# slots — worktrees are named wt1…wtN, so ONE static vhost (hostname regex -> path) serves them all
+#         and there is no per-worktree routing state to reconcile.
+# free   — worktrees are named after the session. No fixed hostname set, so a site only happens
+#          where routing can be wildcarded; without that they are isolated checkouts, which for a
+#          project with no stack at all is exactly right.
+NAMING="${GROVE_NAMING:-slots}"
+SLOTS="${GROVE_SLOTS:-5}"
+
+# lazy  — build the site (database, site config, post-create) on the first file change, because most
+#         sessions never load a site and a dump-and-import on every one of them is the wrong default.
+# eager — build it during create.
+PROVISION="${GROVE_PROVISION:-lazy}"
+
+# What runs this project's site. `none` is a first-class answer: worktrees, paths, branches and
+# merges all work without any container, there is simply no database or URL to hand out.
+STACK="${GROVE_STACK:-ddev}"
+CONTAINER_ROOT="${GROVE_CONTAINER_ROOT:-/var/www/html}"
+LOCAL_ZONE="${GROVE_LOCAL_ZONE:-ddev.site}"
+
+# A submodule that must become a LINKED WORKTREE rather than a clone — see the long note in
+# lib/worktree.sh. Empty for the projects that have none.
+SUBMODULE="${GROVE_SUBMODULE:-}"
+
+DB_SEED="${GROVE_DB_SEED:-clone}"      # clone | empty | none
+DB_GRANT="${GROVE_DB_GRANT:-shared}"   # shared (the stack's own user) | own (per-worktree user)
+
+BRANCH_PREFIX="${GROVE_BRANCH_PREFIX:-worktree-}"
 
 # The one-time root change that switches this machine over.
 rootless_setup_hint() {
