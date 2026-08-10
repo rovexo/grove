@@ -3,7 +3,7 @@ class Grove < Formula
   homepage "https://github.com/rovexo/grove"
   url "https://github.com/rovexo/grove/archive/refs/tags/v0.1.0.tar.gz"
   # sha256 is filled in at release time: shasum -a 256 on the tarball GitHub generates for the tag.
-  sha256 "d2e11adee0987f1ef5faf5f94b1b28722aabcf8f2fc6e6ea4258a846cc6c3e39"
+  sha256 "ed77acb2011eddbf158ed583b7723f442599d1bf79df9d29ab7a2c5e970cfa7e"
   license "MIT"
 
   # System tools grove shells out to. Homebrew is the right packager precisely because it can
