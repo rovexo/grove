@@ -15,6 +15,18 @@ set -uo pipefail
 
 # Homebrew sets GROVE_PKG_DIR via the wrapper it installs in bin/; from a clone there is no
 # wrapper, so fall back to resolving lib/ relative to this file.
+case "${1:-}" in
+	-h|--help|help)
+		printf 'grove — per-worktree dev sites on real public HTTPS subdomains\n\n'
+		printf '  grove status    what is in place and what is not          (no root)\n'
+		printf '  grove cert      issue or renew the zone wildcard          (no root)\n'
+		printf '  grove publish   put this project on the zone              (root only until the\n'
+		printf '                  one-time setup that status prints)\n\n'
+		printf 'Reads .grove.conf from this directory or any parent.\n'
+		exit 0 ;;
+	-V|--version) printf 'grove 0.1.0\n'; exit 0 ;;
+esac
+
 PKG_DIR="${GROVE_PKG_DIR:-$(cd "$(dirname "$(readlink "${BASH_SOURCE[0]}" || printf '%s' "${BASH_SOURCE[0]}")")/.." && pwd)}"
 # shellcheck source=../lib/config.sh
 . "$PKG_DIR/lib/config.sh"
@@ -531,13 +543,5 @@ case "${1:-status}" in
 	status)          cmd_status ;;
 	cert)            cmd_cert ;;
 	publish|install) cmd_install ;;
-	-h|--help|help)
-		printf 'grove — per-worktree dev sites on real public HTTPS subdomains\n\n'
-		printf '  grove status    what is in place and what is not          (no root)\n'
-		printf '  grove cert      issue or renew the zone wildcard          (no root)\n'
-		printf '  grove publish   put this project on the zone              (root only until the\n'
-		printf '                  one-time setup that status prints)\n\n'
-		printf 'Reads .grove.conf from this directory or any parent.\n'
-		;;
 	*)       die "unknown command: $1 — try: grove status | cert | publish  (grove --help)" ;;
 esac
