@@ -49,7 +49,7 @@ case "${1:-}" in
 		printf '  grove hook create | remove | context | on-edit\n\n'
 		printf 'Reads .grove.conf from this directory or any parent.\n'
 		exit 0 ;;
-	-V|--version) printf 'grove 0.2.2\n'; exit 0 ;;
+	-V|--version) printf 'grove 0.2.3\n'; exit 0 ;;
 esac
 
 PKG_DIR="${GROVE_PKG_DIR:-$(cd "$(dirname "$(readlink "${BASH_SOURCE[0]}" || printf '%s' "${BASH_SOURCE[0]}")")/.." && pwd)}"
@@ -206,7 +206,23 @@ cmd_status() {
 		bad "privileged mode — every change needs sudo"
 	fi
 
-	[ -f "$DAEMON_PLIST" ] && ok "renewal timer installed (zone-wide)" || bad "renewal timer missing — run once: sudo grove publish-timer"
+	# A timer that exists is not a timer that works. It fires nightly into a script, and if that
+	# script calls a binary that has since moved there is no error anyone sees — the certificate just
+	# stops renewing and expires months later. So check the whole chain, not the plist.
+	if [ -f "$DAEMON_PLIST" ]; then
+		local renew_bin
+		renew_bin="$(grep -m1 '^GROVE=' "$RENEW_SCRIPT" 2>/dev/null | cut -d'"' -f2)"
+		if [ ! -f "$RENEW_SCRIPT" ]; then
+			bad "renewal timer installed but its script is missing — run: grove publish-timer"
+		elif [ -n "$renew_bin" ] && [ ! -x "$renew_bin" ]; then
+			bad "renewal timer calls $renew_bin, which is not executable — run: grove publish-timer"
+			warn "left alone this renews nothing and the certificate expires with no warning"
+		else
+			ok "renewal timer installed (zone-wide), calling ${renew_bin:-the renewal script}"
+		fi
+	else
+		bad "renewal timer missing — run once: sudo grove publish-timer"
+	fi
 
 	if ! rootless_ready; then
 		printf '\n'
@@ -496,8 +512,31 @@ EOF
 	ok "installed the Caddy daemon ($CADDY_LABEL)"
 }
 
-install_renew_timer() {
-	# The renewal script + a daily LaunchDaemon. Root, because reloading Caddy is root's job.
+# Where this grove actually is. The renewal script runs from a LaunchDaemon with a minimal PATH, so
+# it needs an absolute path — and it must be THIS grove, not a guess.
+#
+# It used to be a guess: "$MAIN_ROOT/grove", from when the tool was a script inside the project. Once
+# grove became an installed binary that path stopped existing, and the failure is the worst shape
+# there is — the timer fires nightly, the command is not found, the log records it, and NOTHING else
+# happens. The certificate simply stops renewing and expires months later with no warning anywhere.
+grove_binary() {
+	local self="${BASH_SOURCE[0]}"
+	case "$self" in /*) ;; *) self="$(cd "$(dirname "$self")" && pwd)/$(basename "$self")" ;; esac
+	# Prefer the wrapper on PATH: through Homebrew that is a stable symlink, whereas this file is the
+	# versioned Cellar copy that an upgrade moves out from under us.
+	command -v grove 2>/dev/null || printf '%s' "$self"
+}
+
+# The renewal script alone — user-owned, so writing it needs no root. Split out from the daemon
+# precisely so a script gone stale can be repaired without one.
+write_renew_script() {
+	mkdir -p "$CERT_DIR" 2>/dev/null
+	# REPLACED, not overwritten. When `sudo grove publish-timer` first installs it the file ends up
+	# owned by root inside a directory owned by you — so a later unprivileged repair cannot write
+	# THROUGH it, but can perfectly well unlink it and put a new one there (removing a file needs the
+	# write bit on the directory, not on the file). Without this, repair fails with "Permission
+	# denied" for no reason a reader could be expected to guess.
+	rm -f "$RENEW_SCRIPT" 2>/dev/null
 	cat >"$RENEW_SCRIPT" <<EOF
 #!/bin/bash
 # Installed by grove. Renews the ${ZONE} wildcard and applies it.
@@ -517,7 +556,15 @@ BEFORE=\$(/usr/bin/openssl x509 -noout -enddate -in "$CRT" 2>/dev/null || echo n
 # GROVE_USER is passed explicitly: this is root running sudo, so SUDO_USER inside the
 # child is "root", and anything inferring the user from it would write the renewed certificate
 # into /var/root while Caddy went on serving the old path.
-/usr/bin/sudo -u "${REAL_USER}" GROVE_USER="${REAL_USER}" "$MAIN_ROOT/grove" cert >>"\$LOG" 2>&1
+# GROVE_PROJECT_ROOT is not optional: a LaunchDaemon starts in / , and grove finds its zone, its
+# ACME contact and its DNS token by walking UP from the working directory to a .grove.conf. Without
+# it the renewal cannot even tell which zone it is for.
+GROVE="$(grove_binary)"
+if [ ! -x "\$GROVE" ]; then
+	echo "FATAL: \$GROVE is not executable — renewal cannot run. Re-run: grove publish-timer" >>"\$LOG"
+	exit 1
+fi
+/usr/bin/sudo -u "${REAL_USER}" GROVE_USER="${REAL_USER}" GROVE_PROJECT_ROOT="$MAIN_ROOT" "\$GROVE" cert >>"\$LOG" 2>&1
 AFTER=\$(/usr/bin/openssl x509 -noout -enddate -in "$CRT" 2>/dev/null || echo none)
 
 # Only bounce Caddy when the certificate actually changed — a daily no-op must not restart the
@@ -534,7 +581,17 @@ else
 	echo "certificate unchanged; nothing to apply" >>"\$LOG"
 fi
 EOF
+	# Checked, because a script that failed to write is indistinguishable from one that worked until
+	# the certificate quietly expires. An earlier version reported success over a failed write.
+	[ -s "$RENEW_SCRIPT" ] || return 1
 	chmod 755 "$RENEW_SCRIPT"
+	# Hand it back to the user when root wrote it, so the next repair needs no root at all.
+	[ "$(id -u)" -eq 0 ] && chown "$REAL_USER" "$RENEW_SCRIPT" 2>/dev/null
+	return 0
+}
+
+install_renew_timer() {
+	write_renew_script
 
 	cat >"$DAEMON_PLIST" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -604,12 +661,18 @@ case "${1:-status}" in
 	# ever, and every project that joins the zone afterwards finds it already running.
 	publish-timer)
 		grove_require_public
-		[ "$(id -u)" -eq 0 ] || die "installing the renewal timer writes to /Library/LaunchDaemons — run: sudo grove publish-timer"
 		require_tools "launchctl:macOS only — no systemd support"
 		[ -f "$CRT" ] || die "no certificate for $ZONE yet — run (as yourself):  grove cert"
+		# REPAIR NEEDS NO ROOT. The daemon lives in /Library/LaunchDaemons, but the script it runs is
+		# in your own directory — so once the timer exists, pointing it at a moved binary is an
+		# ordinary file write. That matters because the script going stale is the likely failure
+		# (grove moves, the project is renamed) while the daemon rarely changes at all.
 		if [ -f "$DAEMON_PLIST" ] && launchctl print "system/${DAEMON_LABEL}" >/dev/null 2>&1; then
-			ok "renewal timer for $ZONE is already running (${DAEMON_LABEL})"
+			write_renew_script || die "could not write $RENEW_SCRIPT — it is owned by $(stat -f '%Su' "$RENEW_SCRIPT" 2>/dev/null || echo root); re-run with sudo"
+			ok "renewal timer for $ZONE is running (${DAEMON_LABEL})"
+			ok "refreshed its script — it calls $(grove_binary) for project $MAIN_ROOT"
 		else
+			[ "$(id -u)" -eq 0 ] || die "installing the timer writes to /Library/LaunchDaemons — run: sudo grove publish-timer"
 			install_renew_timer
 		fi
 		;;

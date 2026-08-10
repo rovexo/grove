@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.2.3 — 2026-08-11
+
+**The renewal timer has never renewed anything.** It called `$PROJECT_ROOT/grove cert` — a path from
+when grove was a script inside the project. Once it became an installed binary that path stopped
+existing, and the failure took the worst possible shape: the timer fires nightly, the command is not
+found, and nothing else happens. Both zones on this machine were on course to serve expired
+certificates in November with no warning anywhere. Found by checking what the timer actually runs,
+after installing one.
+
+- The renewal script now calls the real binary (resolved at write time, preferring the wrapper on
+  PATH) and passes `GROVE_PROJECT_ROOT` — without which a LaunchDaemon starting in `/` cannot find a
+  `.grove.conf` and so cannot tell which zone it is renewing.
+- It refuses loudly rather than silently if that binary is gone.
+- `status` verifies the whole chain — plist, script, and the binary the script calls — because a
+  timer that exists is not a timer that works.
+- Repairing a timer needs no root: the daemon is root's, but the script it runs is yours. It is
+  replaced rather than overwritten, since a root-installed script cannot be written through by its
+  owner — only unlinked and rewritten — and it is handed back to you afterwards.
+- Writing that script is now checked. An earlier version reported success over a failed write.
+
 ## 0.2.2 — 2026-08-11
 
 - **`status` now checks WHERE the wildcard points, not just that it resolves.** A home connection's
