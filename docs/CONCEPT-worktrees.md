@@ -42,44 +42,51 @@ the sync to ignore it entirely, removes both the propagation and the ongoing wat
 
 ## 2. What a project file looks like
 
-`grove.yaml` at the project root, replacing `.grove.conf` (which stays readable for the public half).
+`grove.conf` at the project root — **sourceable shell, no parser, no dependency**. Paths carry
+slashes so they cannot be variable names; a bash array of `path:strategy` pairs handles that without
+inventing a syntax.
 
-```yaml
-project: cbx-magento
-zone: dev.rovexo.com
-upstream_port: 33643
+```sh
+# grove.conf — cbx-magento
+GROVE_PROJECT="cbx-magento"
+GROVE_ZONE="dev.rovexo.com"
+GROVE_UPSTREAM_PORT="33643"
 
-platform: magento2          # a built-in profile — everything below is an override
+GROVE_PLATFORM="magento2"        # sourced first; everything below overrides it
+GROVE_DOCROOT="docroot/pub"      # the only thing efka differs on
 
-worktrees:
-  naming: slots             # slots (wt1…wtN, fixed hostnames) | free (needs a wildcard local host)
-  slots: 5
-  provision: lazy           # lazy = build the site on first file change | eager
+GROVE_NAMING="slots"             # slots (wt1…wtN) | free (needs a wildcard local hostname)
+GROVE_SLOTS=5
+GROVE_PROVISION="lazy"           # lazy = build the site on first file change | eager
 
-  paths:
-    vendor:       container   # <- the ask
-    generated:    container
-    pub/static:   empty
-    var/cache:    empty
-    var/log:      empty
-    pub/media:    clone
-    node_modules: link
+GROVE_PATHS+=(
+    "vendor:container"           # <- the ask: copied in-container, excluded from sync
+    "generated:container"
+)
 
-  database:
-    seed: clone             # clone | empty
-    grant: own              # own = per-worktree user, scoped to its schema | shared
+GROVE_DB_SEED="clone"            # clone | empty
+GROVE_DB_GRANT="own"             # own = per-worktree user scoped to its schema | shared
 
-  hooks:
-    post_create:            # run in the container, in the worktree, after the site exists
-      - bin/magento setup:di:compile
-      - bin/magento cache:flush
+GROVE_POST_CREATE+=(
+    "bin/magento setup:di:compile"
+    "bin/magento cache:flush"
+)
 ```
 
-**The profile carries the platform knowledge**, so a project file is short. `platform: magento2`
-already knows about `vendor`, `generated`, `var/*`, `pub/media` and the `app/etc/env.php` rewrite —
-cbx-magento's file above is mostly re-stating defaults for clarity, and could be four lines.
+**Profiles are just shell files, sourced first.** `profiles/magento2.sh` ships with grove and sets the
+platform defaults — `pub/media:clone`, `var/cache:empty`, the `app/etc/env.php` rewrite. The project
+file is sourced after it, so overriding is ordinary assignment and extending is `+=`. No merge
+semantics to specify, no precedence rules to document: **later wins, because that is what shell does.**
 
----
+For the arrays, grove resolves **last entry per path wins**, so a project can override one line of a
+profile without restating the list:
+
+```sh
+GROVE_PATHS+=( "vendor:fresh" )   # profile said container; this project wants composer install
+```
+
+That is the whole format. It is `source`-able by the existing script, needs nothing installed, and
+survives grove staying a single dependency-free file — which is most of why it is easy to install.
 
 ## 3. The four projects, side by side
 
@@ -147,19 +154,18 @@ the most bespoke behaviour to lose.
 
 ## 7. Risks worth deciding before building
 
-- **A sync-ignored `vendor/` is invisible to the IDE.** PhpStorm indexes the host filesystem; if
-  `vendor/` only exists in the container, autocomplete and go-to-definition break *in that worktree*.
-  Probably acceptable (index the main checkout, which keeps its own vendor) — but it is a real cost of
-  the thing being asked for, and it should be a per-path opt-in rather than a profile default.
+- ~~A sync-ignored `vendor/` is invisible to the IDE.~~ **Decided: acceptable.** It only affects the
+  worktree; the main checkout keeps its own `vendor/` and that is what gets indexed. So `container`
+  can be a profile default for Magento rather than a per-project opt-in.
 - **`container` needs a source.** Copying from the main checkout's in-container path is fast and
   correct, but couples the worktree to whatever the main checkout had at that moment. `composer
   install` in the worktree is correct and slow. Default to the copy; offer `container:fresh`.
 - **Post-create hooks make `create` slow again.** `di:compile` is minutes. It should respect
   `provision: lazy` — deferred to first use, like the database already is.
-- **One config format, two consumers.** The public half reads `.grove.conf` (shell). Adding YAML means
-  a parser; bash has none. Either keep everything in shell syntax and lose nesting, or accept a
-  dependency (`yq`), or generate. **My preference: keep it shell-source-able** — `GROVE_PATH_vendor=container`
-  is ugly next to YAML but keeps grove a single dependency-free script, which is most of why it is
-  easy to install.
+- ~~One config format, two consumers.~~ **Decided: shell.** `.grove.conf` grows the worktree keys
+  rather than gaining a second file in another language. Arrays of `path:strategy` cover the one place
+  nesting seemed necessary, and sourced profiles give inheritance for free.
 
-That last one is the real decision. Everything else here is mechanical.
+Both open decisions are settled; what remains above is mechanical. The next step is
+`profiles/magento2.sh` and `grove create`, proven against cbx-magento first — it carries the
+requirement that shaped the design, so it fails fastest if `container` is wrong.
