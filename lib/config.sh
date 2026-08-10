@@ -205,7 +205,12 @@ ADMIN="${GROVE_CADDY_ADMIN:-localhost:2019}"
 caddy_imports_sites() { grep -qsF "import $SITES_DIR/" "$CADDYFILE" 2>/dev/null; }
 
 # Is the admin API answering? Without it a reload means restarting the daemon, which needs root.
-caddy_admin_up() { curl -s -o /dev/null --max-time 2 "http://${ADMIN}/config/" 2>/dev/null; }
+#
+# The timeout is deliberately generous. At two seconds this reported "the admin API is off" on a
+# machine that was merely busy (a container stack restarting alongside it), and the consequence of
+# that false negative is not cosmetic: status then tells you rootless mode is unavailable and to
+# reach for sudo, for a setup that is working perfectly.
+caddy_admin_up() { curl -s -o /dev/null --max-time 6 "http://${ADMIN}/config/" 2>/dev/null; }
 
 # Rootless is available only when BOTH hold — otherwise fall back to the privileged path.
 rootless_ready() { caddy_imports_sites && caddy_admin_up; }

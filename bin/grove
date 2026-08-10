@@ -32,7 +32,8 @@ case "${1:-}" in
 		printf '  grove status              what is in place and what is not      (no root)\n'
 		printf '  grove cert                issue or renew the zone wildcard      (no root)\n'
 		printf '  grove publish             put this project on the zone          (root only until\n'
-		printf '                            the one-time setup that status prints)\n\n'
+		printf '                            the one-time setup that status prints)\n'
+		printf '  sudo grove publish-timer  install the zone renewal timer         (root, once per zone)\n\n'
 		printf 'Worktrees\n'
 		printf '  grove create <name>       branch + worktree + site. No sudo, no prompts.\n'
 		printf '  grove list                every worktree: branch, URL, database, idle time\n'
@@ -164,13 +165,13 @@ cmd_status() {
 			warn "give this machine a DHCP reservation so it stops moving"
 		else
 			if [ "$mine" = "no" ]; then
-				bad "caddy $ZONE block exists but does NOT route $PROJECT — run: sudo grove publish"
+				bad "caddy $ZONE block exists but does NOT route $PROJECT — run: $(rootless_ready && printf 'grove publish' || printf 'sudo grove publish')"
 			else
 				ok "caddy routes $PROJECT ($mine)${bound:+, bound to $bound}"
 			fi
 		fi
 	else
-		bad "caddy site block missing — run: sudo grove publish"
+		bad "caddy site block missing — run: $(rootless_ready && printf 'grove publish' || printf 'sudo grove publish')"
 	fi
 
 	local others; others="$(zone_projects)"
@@ -184,7 +185,7 @@ cmd_status() {
 		bad "privileged mode — every change needs sudo"
 	fi
 
-	[ -f "$DAEMON_PLIST" ] && ok "renewal timer installed (zone-wide)" || bad "renewal timer missing (installed by \`install\`)"
+	[ -f "$DAEMON_PLIST" ] && ok "renewal timer installed (zone-wide)" || bad "renewal timer missing — run once: sudo grove publish-timer"
 
 	if ! rootless_ready; then
 		printf '\n'
@@ -575,6 +576,22 @@ case "${1:-status}" in
 	status)          cmd_status ;;
 	cert)            cmd_cert ;;
 	publish|install) cmd_install ;;
+
+	# The one genuinely root-requiring step, and the only one: a LaunchDaemon lives in
+	# /Library/LaunchDaemons, which no unprivileged process can write. Split out from `publish` so
+	# rootless mode does not have to give up its whole no-sudo story for it — a zone needs this once,
+	# ever, and every project that joins the zone afterwards finds it already running.
+	publish-timer)
+		grove_require_public
+		[ "$(id -u)" -eq 0 ] || die "installing the renewal timer writes to /Library/LaunchDaemons — run: sudo grove publish-timer"
+		require_tools "launchctl:macOS only — no systemd support"
+		[ -f "$CRT" ] || die "no certificate for $ZONE yet — run (as yourself):  grove cert"
+		if [ -f "$DAEMON_PLIST" ] && launchctl print "system/${DAEMON_LABEL}" >/dev/null 2>&1; then
+			ok "renewal timer for $ZONE is already running (${DAEMON_LABEL})"
+		else
+			install_renew_timer
+		fi
+		;;
 
 	# --- the worktree half ---
 	create)
