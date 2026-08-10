@@ -579,6 +579,18 @@ grove_create() { # <name> [<base-ref>] [<session-id>] [<transcript>]
 	fi
 	wt="$(grove_wt_dir "$name")"
 
+	# A reused slot can still hold the previous session's container-side files: the teardown that
+	# should have purged them is best-effort (Claude Code's periodic sweep removes worktrees without
+	# firing WorktreeRemove at all), and the file sync cannot clear what it is told to ignore.
+	#
+	# BEFORE the checkout, never after. The sync is bidirectional: deleting the container's copy of a
+	# path that EXISTS on the host propagates that deletion straight back, and a purge run after
+	# `git worktree add` therefore deletes the files git has just checked out — leaving a directory
+	# holding nothing but grove's own creations and a worktree git immediately calls prunable.
+	# Allocation only ever returns a name whose host directory does not exist, so here the two sides
+	# already agree and there is nothing for the sync to carry.
+	grove_container_purge "$name"
+
 	branch="${BRANCH_PREFIX}${slug}"
 	n=2
 	while git -C "$MAIN_ROOT" show-ref --verify --quiet "refs/heads/$branch"; do
@@ -599,12 +611,6 @@ grove_create() { # <name> [<base-ref>] [<session-id>] [<transcript>]
 	# Before a single strategy runs: teach git that everything grove is about to create is local
 	# data. Doing it after would leave a window in which `git add -A` could stage it.
 	grove_write_excludes
-
-	# A reused slot can still hold the previous session's container-side files: the teardown that
-	# should have purged them is best-effort (Claude Code's periodic sweep removes worktrees without
-	# firing WorktreeRemove at all), and the file sync cannot clear what it is told to ignore. Start
-	# from nothing rather than inherit a stranger's tree.
-	grove_container_purge "$name"
 
 	# --- the submodule ---------------------------------------------------------------------------
 	# A LINKED WORKTREE of the submodule repository, never a clone. A plain `git worktree add` leaves
