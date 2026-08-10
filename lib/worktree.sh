@@ -853,6 +853,15 @@ grove_write_note() { # <name>
 				echo "**The site is not built yet.** It builds itself on your first file change (that is the"
 				echo "\`.grove-provision-pending\` marker) — or run \`grove provision $name\` to do it now."
 				echo
+				echo "**A file can be in HEAD before it is on disk here.** The checkout is still filling in"
+				echo "behind you, and on a synced stack the container's view lags the host's. If an edit fails"
+				echo "with \"file does not exist\" for something \`git show HEAD:<path>\` clearly has, that is"
+				echo "this — not a broken worktree. Materialise the one file you need and carry on:"
+				echo
+				echo '```bash'
+				echo "git checkout HEAD -- <path>"
+				echo '```'
+				echo
 			fi
 		else
 			echo "You are in an isolated git worktree (\`$name\`, branch \`$branch\`) with NO site of its own."

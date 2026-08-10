@@ -49,7 +49,7 @@ case "${1:-}" in
 		printf '  grove hook create | remove | context | on-edit\n\n'
 		printf 'Reads .grove.conf from this directory or any parent.\n'
 		exit 0 ;;
-	-V|--version) printf 'grove 0.2.1\n'; exit 0 ;;
+	-V|--version) printf 'grove 0.2.2\n'; exit 0 ;;
 esac
 
 PKG_DIR="${GROVE_PKG_DIR:-$(cd "$(dirname "$(readlink "${BASH_SOURCE[0]}" || printf '%s' "${BASH_SOURCE[0]}")")/.." && pwd)}"
@@ -128,11 +128,32 @@ cmd_status() {
 	printf '  %-14s %s\n' "LAN IP" "${ip:-unknown}"
 	printf '  %-14s %s\n' "Upstream" "127.0.0.1:${UPSTREAM_PORT}"
 
-	# DNS: the wildcard is the only record that matters.
-	if [ "$(dig +short A "probe-$$.${ZONE}" | head -1)" != "" ]; then
-		ok "DNS  *.${ZONE} resolves"
-	else
+	# DNS: the wildcard is the only record that matters — and WHERE it points matters as much as
+	# whether it resolves.
+	#
+	# A home connection's WAN address moves. When it does, the record goes on resolving perfectly to
+	# an address that is no longer yours, and every public URL for the zone dies from the outside
+	# while everything on this machine still looks healthy: the certificate is valid, Caddy is
+	# serving, the local names work. It is a silent, total outage that presents as nothing at all.
+	# (Found exactly that way: a zone had been pointing at a stale address for some time, and only a
+	# second zone being set up alongside it made the mismatch visible.)
+	local resolved wan
+	resolved="$(dig +short A "probe-$$.${ZONE}" | tail -1)"
+	if [ -z "$resolved" ]; then
 		bad "DNS  *.${ZONE} does NOT resolve — add:  *.${ZONE}  A  <public IP>"
+	else
+		# Best-effort and never fatal: no network, or a service being down, must not turn a healthy
+		# report red. Silence here means "could not check", which is why it says so.
+		wan="$(curl -s --max-time 4 https://api.ipify.org 2>/dev/null)"
+		case "$wan" in
+		''|*[!0-9.]*) ok "DNS  *.${ZONE} resolves to $resolved (public IP unknown — not compared)" ;;
+		"$resolved")  ok "DNS  *.${ZONE} resolves to $resolved, which is this connection" ;;
+		*)
+			bad "DNS  *.${ZONE} points at $resolved but this connection is $wan"
+			warn "every public URL on this zone is dead from the outside until the record is updated"
+			warn "a dynamic WAN address will do this again — a static IP or a dynamic-DNS updater is the fix"
+			;;
+		esac
 	fi
 
 	# The pinned upstream port has to exist or Caddy proxies into nothing.

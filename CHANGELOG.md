@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.2.2 — 2026-08-11
+
+- **`status` now checks WHERE the wildcard points, not just that it resolves.** A home connection's
+  WAN address moves; when it does the record keeps resolving perfectly to an address that is no
+  longer yours, and every public URL on the zone dies from the outside while this machine still looks
+  healthy — valid certificate, Caddy serving, local names fine. A silent, total outage that presents
+  as nothing at all. Found by setting up a second zone next to one that had been stale for a while.
+- The worktree note warns that a file can be in HEAD before it is on disk: the checkout fills in
+  behind a session, and on a synced stack the container's view lags the host's. An edit failing with
+  "file does not exist" for something HEAD clearly has is that, not a broken worktree.
+- The formula is a plain archive URL again — the repository is public, so no token and no auth header.
+
 ## 0.2.1 — 2026-08-10
 
 Found by standing the whole tool up on a second zone (dev.configbox.at) with a real app on it.
