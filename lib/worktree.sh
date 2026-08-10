@@ -689,6 +689,14 @@ grove_create() { # <name> [<base-ref>] [<session-id>] [<transcript>]
 $(grove_each_path)
 EOF
 
+	# The worktree's own identity, in one predictable file at its root.
+	#
+	# DB and URL are here for the APPLICATION, not for grove: a platform profile rewrites the config
+	# file it knows about (configuration.php, wp-config.php, env.php), but a `plain` project has no
+	# such file and grove cannot invent one. Without this, grove seeds a per-worktree database that
+	# the app has no way to learn the name of — so every worktree faithfully serves its own docroot
+	# out of the MAIN database, which looks like isolation right up until it matters. Two lines of
+	# app code reading this file is all a plain project needs.
 	{
 		printf 'NAME=%s\n' "$name"
 		printf 'BRANCH=%s\n' "$branch"
@@ -696,6 +704,11 @@ EOF
 		printf 'CREATED=%s\n' "$(date '+%Y-%m-%d %H:%M:%S')"
 		printf 'SESSION_ID=%s\n' "$session_id"
 		printf 'TRANSCRIPT=%s\n' "$transcript"
+		if grove_has_site "$name"; then
+			printf 'DB=%s\n' "$(grove_wt_db "$name")"
+			printf 'URL=%s\n' "$(grove_wt_url "$name")"
+			[ "$STACK" = "ddev" ] && printf 'LOCAL_URL=https://%s\n' "$(grove_wt_local_host "$name")"
+		fi
 	} >"$wt/$GROVE_META" 2>/dev/null
 
 	# Returned to the caller in variables rather than on stdout: the WorktreeCreate hook's stdout is

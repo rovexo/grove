@@ -113,6 +113,15 @@ GROVE_ACME_EMAIL="you@example.com"
 #    "node_modules:link"
 #)
 
+# HOW YOUR APP LEARNS WHICH DATABASE IT OWNS. A platform profile rewrites the config file it knows
+# about (configuration.php, wp-config.php, app/etc/env.php). A `plain` project has no such file, so
+# grove writes the worktree's identity to `.grove-meta` at its root instead:
+#
+#     NAME=wt1   BRANCH=worktree-…   DB=wt1   URL=https://wt1-myproject.dev.example.com
+#
+# Read it, or the worktree serves its own docroot out of the MAIN database — which looks exactly like
+# isolation until the moment it matters.
+#
 # Run inside the container after a worktree's site is built. Slow ones belong here rather than in
 # create — with GROVE_PROVISION="lazy" they are paid only by a session that actually works on files.
 #GROVE_POST_CREATE+=(
