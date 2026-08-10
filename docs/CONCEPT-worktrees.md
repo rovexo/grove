@@ -111,21 +111,56 @@ The strategy exists for the case that needs it and costs the others nothing.
 
 ---
 
-## 4. Command surface
+## 4. Command surface — and who actually calls it
+
+An audit of what the existing tooling exposes, against what an AI session actually invokes, found the
+concept's first draft aimed at the wrong caller. **A session never types `grove create`.** Claude Code
+fires a `WorktreeCreate` hook; the session is *moved* into a worktree and has to be *told* where it
+landed. Five wirings exist in cbx-joomla today and every one of them is machine-triggered:
+
+| Event | Does what |
+|---|---|
+| `WorktreeCreate` | build the worktree + site. Its stdout **is** the worktree path — nothing else may print |
+| `WorktreeRemove` | drop schema, user, vhost, pool, worktree |
+| `SessionStart` | tell the session its URL, database and branches |
+| `PostToolUse[EnterWorktree]` | same, for a background session moved mid-flight (no SessionStart fires) |
+| `PostToolUse[Edit|Write]` | build the site on first file change, when provisioning is lazy |
+
+So grove ships **hook entry points**, and a project wires those into `settings.json` instead of
+carrying five scripts:
+
+```
+grove hook create | remove | context | on-edit
+```
+
+That is the interface that matters. The CLI below is the human one.
 
 ```
 grove create <name>          branch + worktree + site.   No sudo. No prompts.
-grove list                   every worktree: branch, URL, database, idle time
+grove list                   worktrees: branch, URL, database, idle time
 grove info <name>            paths, URL, schema, table count, commits ahead
 grove shell <name> [cmd]     run in that worktree, inside the container
+grove provision <name>       give a site-less worktree its site after the fact
 grove sync-db <name>         re-seed its schema from the main one
-grove remove <name>          drop schema + user, vhost, pool, worktree
+grove merge <name> [--keep]  land the work: merge the branch AND the submodule branch,
+                             bump the pointer, then release the slot unless --keep
+grove remove <name> [-f]     release without merging
+grove prune-merged           delete worktree-* branches whose commits are all merged
 ```
 
-alongside today's `status`, `cert`, `publish`. The split stays legible: **`publish` is per project and
-runs once; `create` is per worktree and runs constantly.**
+`merge` and `prune-merged` were missing from the first draft and are the two an agent leans on most —
+`merge` is how a session's work gets back, and it is the fiddliest thing in the existing tooling
+(submodule branch, pointer bump, refusing while the tree is dirty, stopping cleanly on conflict).
+Absorbing it is most of the value; leaving it out would mean every project keeps a script anyway.
 
----
+### Telling the session where it landed
+
+Worth calling out because it is not a command and it is easy to forget: a worktree nobody knows about
+is useless. The existing implementation writes the note **twice** — `WORKTREE-SITE.md` at the worktree
+root, and the same content as `CLAUDE.local.md`, which Claude Code auto-loads as project memory. The
+second is load-bearing: a session inside a worktree reads that worktree's *committed*
+`.claude/settings.json`, so hook config that only exists uncommitted never fires there. grove has to
+carry that, or the context hook silently does nothing in exactly the case it exists for.
 
 ## 5. What grove derives rather than asks for
 
@@ -143,8 +178,9 @@ The point of one declaration per path is that everything downstream follows from
 
 ## 6. Migration
 
-Per project: write `grove.yaml`, run `grove create` once into a spare slot, compare against a
-worktree the old hook made, then delete the four `.claude/hooks/worktree-*.sh` and `tools/worktree-site.sh`.
+Per project: write the worktree keys into `.grove.conf`, run `grove create` once into a spare slot, compare against a
+worktree the old hook made, then replace the five hook scripts with `grove hook …` lines in `settings.json` and delete
+`tools/worktree-site.sh`.
 
 Order matters. **cbx-magento first, not cbx-joomla** — it is the one with the requirement that shaped
 the design, so it fails fastest if `container` is wrong. cbx-joomla last: it is the most-used and has
