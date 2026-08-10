@@ -13,10 +13,12 @@ class Grove < Formula
   depends_on :macos
 
   def install
-    libexec.install "lib", "templates", "docs"
-    bin.install "bin/grove"
-    # The binary resolves its lib/ relative to its own location, so point it at the real tree
-    # rather than the symlink Homebrew puts in bin/.
+    # bin/ and lib/ are internals — libexec keeps them off PATH while the wrapper below points at
+    # them. templates/ and docs/ are for humans, so they go where `brew --prefix grove` finds them:
+    # the config hint tells people to copy from exactly that path, and it has to be true.
+    libexec.install "bin", "lib"
+    prefix.install "templates", "docs"
+    # grove resolves lib/ from GROVE_PKG_DIR, so it works through Homebrew's symlink.
     (bin/"grove").write_env_script libexec/"bin/grove", GROVE_PKG_DIR: libexec
   end
 

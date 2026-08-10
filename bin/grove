@@ -4,7 +4,7 @@
 #
 #   status     what is in place and what is not                                    (no root)
 #   cert       issue or renew the zone's wildcard via DNS-01                       (no root)
-#   install    claim this project's host pattern in the proxy + renewal timer      (ONE sudo)
+#   publish    claim this project's host pattern in the proxy + renewal timer      (ONE sudo)
 #
 # Everything project-specific comes from .grove.conf at the project root; this file contains no
 # project names, zones or ports. See docs/PLAYBOOK.md for the design and the traps.
@@ -13,7 +13,9 @@
 
 set -uo pipefail
 
-PKG_DIR="$(cd "$(dirname "$(readlink "${BASH_SOURCE[0]}" || printf '%s' "${BASH_SOURCE[0]}")")/.." && pwd)"
+# Homebrew sets GROVE_PKG_DIR via the wrapper it installs in bin/; from a clone there is no
+# wrapper, so fall back to resolving lib/ relative to this file.
+PKG_DIR="${GROVE_PKG_DIR:-$(cd "$(dirname "$(readlink "${BASH_SOURCE[0]}" || printf '%s' "${BASH_SOURCE[0]}")")/.." && pwd)}"
 # shellcheck source=../lib/config.sh
 . "$PKG_DIR/lib/config.sh"
 
@@ -119,17 +121,17 @@ cmd_status() {
 		if [ -n "$bound" ] && [ -n "$ip" ] && [ "$bound" != "$ip" ]; then
 			# DHCP moved the machine. Caddy is still bound to (or failing to bind) the old address
 			# and the router's forward points at it — a total outage that looks like a DNS problem.
-			bad "caddy bound to $bound but this machine is $ip — re-run: sudo grove install"
+			bad "caddy bound to $bound but this machine is $ip — re-run: sudo grove publish"
 			warn "give this machine a DHCP reservation so it stops moving"
 		else
 			if [ "$mine" = "no" ]; then
-				bad "caddy $ZONE block exists but does NOT route $PROJECT — run: sudo grove install"
+				bad "caddy $ZONE block exists but does NOT route $PROJECT — run: sudo grove publish"
 			else
 				ok "caddy routes $PROJECT ($mine)${bound:+, bound to $bound}"
 			fi
 		fi
 	else
-		bad "caddy site block missing — run: sudo grove install"
+		bad "caddy site block missing — run: sudo grove publish"
 	fi
 
 	local others; others="$(zone_projects)"
@@ -237,7 +239,7 @@ cmd_install_rootless() {
 	if [ -f "$DAEMON_PLIST" ] && launchctl print "system/${DAEMON_LABEL}" >/dev/null 2>&1; then
 		ok "renewal timer for $ZONE already running"
 	else
-		warn "renewal timer not installed — that one step still needs: sudo grove install-timer"
+		warn "renewal timer not installed — that one step still needs: sudo grove publish-timer"
 	fi
 }
 
@@ -526,8 +528,8 @@ apply_caddy() {
 }
 
 case "${1:-status}" in
-	status)  cmd_status ;;
-	cert)    cmd_cert ;;
-	install) cmd_install ;;
+	status)          cmd_status ;;
+	cert)            cmd_cert ;;
+	publish|install) cmd_install ;;
 	*)       die "usage: public-host.sh [status|cert|install]" ;;
 esac

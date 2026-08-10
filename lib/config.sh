@@ -98,7 +98,7 @@ LEGO_DIR="$CERT_DIR/lego"
 CRT="$CERT_DIR/certs/_.${ZONE}.crt"
 KEY="$CERT_DIR/certs/_.${ZONE}.key"
 
-DAEMON_LABEL="dev.grove.renew.${ZONE}"
+DAEMON_LABEL="com.rovexo.grove.renew.${ZONE}"
 DAEMON_PLIST="/Library/LaunchDaemons/${DAEMON_LABEL}.plist"
 RENEW_SCRIPT="$CERT_DIR/renew.sh"
 
