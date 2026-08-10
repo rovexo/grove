@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.2.1 — 2026-08-10
+
+Found by standing the whole tool up on a second zone (dev.configbox.at) with a real app on it.
+
+- **`sudo grove publish-timer`** — status told you to run this and it was not a command. The renewal
+  timer genuinely needs root (a LaunchDaemon), but it is per ZONE and needed once ever, so splitting
+  it out lets rootless mode keep its no-sudo story for everything else.
+- **The worktree is told its own database and URL.** `DB`, `URL` and `LOCAL_URL` join `.grove-meta`.
+  A platform profile rewrites the config file it knows; a plain project has none, and without this it
+  serves its own docroot out of the main database — isolation that is not.
+- `status` no longer says "run `sudo grove publish`" where rootless mode is active and no sudo is
+  needed, and no longer reports rootless mode unavailable because the admin API took longer than two
+  seconds to answer on a busy machine.
+- The Homebrew formula fetches through the API, since the repository is private and Homebrew does not
+  authenticate against plain archive URLs — and current Homebrew has dropped the private-repo
+  download strategies that used to cover it.
+
 ## 0.2.0 — 2026-08-10
 
 grove absorbs worktree management. The lifecycle that lived in four projects — slot allocation,

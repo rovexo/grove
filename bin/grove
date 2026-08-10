@@ -49,7 +49,7 @@ case "${1:-}" in
 		printf '  grove hook create | remove | context | on-edit\n\n'
 		printf 'Reads .grove.conf from this directory or any parent.\n'
 		exit 0 ;;
-	-V|--version) printf 'grove 0.2.0\n'; exit 0 ;;
+	-V|--version) printf 'grove 0.2.1\n'; exit 0 ;;
 esac
 
 PKG_DIR="${GROVE_PKG_DIR:-$(cd "$(dirname "$(readlink "${BASH_SOURCE[0]}" || printf '%s' "${BASH_SOURCE[0]}")")/.." && pwd)}"
