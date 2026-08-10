@@ -531,5 +531,13 @@ case "${1:-status}" in
 	status)          cmd_status ;;
 	cert)            cmd_cert ;;
 	publish|install) cmd_install ;;
-	*)       die "usage: public-host.sh [status|cert|install]" ;;
+	-h|--help|help)
+		printf 'grove — per-worktree dev sites on real public HTTPS subdomains\n\n'
+		printf '  grove status    what is in place and what is not          (no root)\n'
+		printf '  grove cert      issue or renew the zone wildcard          (no root)\n'
+		printf '  grove publish   put this project on the zone              (root only until the\n'
+		printf '                  one-time setup that status prints)\n\n'
+		printf 'Reads .grove.conf from this directory or any parent.\n'
+		;;
+	*)       die "unknown command: $1 — try: grove status | cert | publish  (grove --help)" ;;
 esac
