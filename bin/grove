@@ -82,7 +82,7 @@ lan_ip() {
 
 # The address the Caddyfile was written with, so status can spot DHCP moving the machine underneath it.
 caddyfile_bound_ip() {
-	awk '/^'"${ZONE//./\\.}"'|^\*\.'"${ZONE//./\\.}"'/{f=1} f&&/^[[:space:]]*bind /{print $2; exit}' "$CADDYFILE" 2>/dev/null
+	grove_caddy_cat | awk '/^'"${ZONE//./\\.}"'|^\*\.'"${ZONE//./\\.}"'/{f=1} f&&/^[[:space:]]*bind /{print $2; exit}' 2>/dev/null
 }
 
 # The Cloudflare token, from the gitignored secrets file. Never echoed, never committed.
@@ -148,12 +148,12 @@ cmd_status() {
 		bad "cert  missing — run: grove cert"
 	fi
 
-	if grep -qs "$ZONE" "$CADDYFILE" 2>/dev/null; then
+	if grove_caddy_cat | grep -q "$ZONE"; then
 		# The zone block existing is not the same as THIS project being routed by it. A second
 		# project on an established zone sees the block already there and must still claim its
 		# hosts, so report the two facts separately.
 		local mine="no"
-		grep -q "$HOST_PATTERN" "$CADDYFILE" && mine="matcher"
+		grove_caddy_cat | grep -q -- "$HOST_PATTERN" && mine="matcher"
 		[ "$(caddyfile_default_port)" = "$UPSTREAM_PORT" ] && mine="default upstream"
 
 		local bound; bound="$(caddyfile_bound_ip)"

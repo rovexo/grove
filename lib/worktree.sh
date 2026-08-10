@@ -408,6 +408,33 @@ grove_db_drop() { # <name>
 
 # --- container-side work ----------------------------------------------------------------------------
 
+# Delete a worktree's whole directory INSIDE the container.
+#
+# Removing the worktree host-side is not enough, and the reason is the `container` strategy itself:
+# the file sync has been told to ignore those paths, so it will not carry their deletion either — and
+# it refuses to remove a directory tree that still holds ignored content, which strands the ENTIRE
+# worktree in the container rather than just the excluded path.
+#
+# Two consequences, one of them a correctness bug rather than mere waste. The obvious one is garbage:
+# a Magento vendor/ per abandoned worktree, forever. The sharp one is that the vhost keeps serving
+# that stale copy at its URL, and the next session handed the same slot would be looking at the
+# previous session's files.
+#
+# The path is rebuilt here from CONTAINER_ROOT and the name rather than taken from a caller, and
+# refuses anything that is not inside the worktrees directory: this is an `rm -rf` running as root
+# inside a container that has the project mounted.
+grove_container_purge() { # <name>
+	local name="$1" cdir base
+	[ -n "$name" ] || return 1
+	case "$name" in */*|.|..|"") return 1 ;; esac
+	grove_stack_running || return 0
+	base="$CONTAINER_ROOT/$WORKTREES_REL"
+	cdir="$base/$name"
+	grove_stack_exec "case '$cdir' in '$base'/?*) rm -rf '$cdir' ;; *) exit 1 ;; esac" >/dev/null 2>&1 \
+		|| { grove_log "WARN: could not purge the container-side copy at $cdir"; return 1; }
+	grove_log "purged the container-side directory $cdir"
+}
+
 # Copy every `container` path from the main checkout's in-container location into the worktree's.
 # Fast, because it never leaves the container; and the files are excluded from sync, so nothing
 # propagates back out.
@@ -416,7 +443,9 @@ grove_container_copies() { # <name>
 	cdir="$(grove_wt_container_dir "$wt")"
 	while IFS= read -r rel; do
 		[ -n "$rel" ] || continue
-		cmd="mkdir -p '$cdir/$rel' && cp -a '$CONTAINER_ROOT/$rel/.' '$cdir/$rel/' 2>/dev/null"
+		# Cleared first rather than merged into: a slot can be reused, and `cp -a` over a previous
+		# session's tree would leave that session's files behind wherever the new one has none.
+		cmd="rm -rf '$cdir/$rel' && mkdir -p '$cdir/$rel' && cp -a '$CONTAINER_ROOT/$rel/.' '$cdir/$rel/' 2>/dev/null"
 		if grove_stack_exec "$cmd" >/dev/null 2>&1; then
 			grove_log "container-side copy: $rel"
 		else
@@ -570,6 +599,12 @@ grove_create() { # <name> [<base-ref>] [<session-id>] [<transcript>]
 	# Before a single strategy runs: teach git that everything grove is about to create is local
 	# data. Doing it after would leave a window in which `git add -A` could stage it.
 	grove_write_excludes
+
+	# A reused slot can still hold the previous session's container-side files: the teardown that
+	# should have purged them is best-effort (Claude Code's periodic sweep removes worktrees without
+	# firing WorktreeRemove at all), and the file sync cannot clear what it is told to ignore. Start
+	# from nothing rather than inherit a stranger's tree.
+	grove_container_purge "$name"
 
 	# --- the submodule ---------------------------------------------------------------------------
 	# A LINKED WORKTREE of the submodule repository, never a clone. A plain `git worktree add` leaves
@@ -877,6 +912,8 @@ grove_remove() { # <name> [-f]
 	if grove_has_site "$name" && grove_stack_running; then
 		grove_db_drop "$name" && printf 'Dropped database %s.\n' "$(grove_wt_db "$name")"
 	fi
+	# The container keeps its own copy of anything sync-ignored, so it has to be told explicitly.
+	grove_container_purge "$name"
 	printf '%s is free.\n' "$name"
 	grove_log "released $name"
 }
@@ -1047,7 +1084,7 @@ grove_list() {
 	local stack_up="no"; grove_stack_running && stack_up="yes"
 	local i name dir url state notes
 
-	printf '%-16s  %-32s  %-40s  %s\n' "WORKTREE" "BRANCH" "SITE" "STATE"
+	printf '%-20s  %-32s  %-42s  %s\n' "WORKTREE" "BRANCH" "SITE" "STATE"
 
 	if [ "$NAMING" = "slots" ]; then
 		i=1
@@ -1063,7 +1100,7 @@ grove_list() {
 				fi
 				state="free"
 				[ -n "$notes" ] && state="free ($notes)"
-				printf '%-16s  %-32s  %-40s  %s\n' "$name" "-" "-" "$state"
+				printf '%-20s  %-32s  %-42s  %s\n' "$name" "-" "-" "$state"
 				continue
 			fi
 			grove_list_row "$name" "$dir" "$stack_up"
@@ -1110,7 +1147,7 @@ grove_list_row() { # <name> <dir> <stack-up>
 	else
 		state="$state, idle unknown"
 	fi
-	printf '%-16s  %-32s  %-40s  %s\n' "$name" "$branch" "$url" "$state"
+	printf '%-20s  %-32s  %-42s  %s\n' "$name" "$branch" "$url" "$state"
 }
 
 grove_info() { # <name>
@@ -1234,7 +1271,9 @@ grove_wire_vhost() {
 # to clear the realpath and opcode caches, and a stale cache serves the PREVIOUS worktree's files — a
 # failure that reads as "my edits don't show up". A literal path per request has no such state.
 #
-# Not #ddev-generated on purpose: this file is grove's, ddev must not regenerate it.
+# Deliberately NOT carrying ddev's generated-file marker — this file is grove's and ddev must leave it
+# alone. The marker is spelled with an underscore here (#_ddev-generated) precisely so that saying so
+# does not itself trip ddev's scan for it.
 
 # Which worktree a request is for, derived from the Host header — local and public names both. A
 # \`map\` rather than a named capture in server_name because nginx will not let two regexes in one
@@ -1316,15 +1355,49 @@ grove_wire_sync() {
 	paths="$(grove_container_paths)"
 	[ -n "$paths" ] || { printf '  no `container` paths — nothing to exclude from sync\n'; return 0; }
 
+	# An existing file is EDITED IN PLACE rather than replaced: it is ddev's, and it carries settings
+	# (the symlink mode, the .git exclusions) that must survive. The insertion point is unambiguous —
+	# the `paths:` list under `ignore:` — and the block is delimited so re-running replaces it.
+	#
+	# ddev's copy also carries its generated-file marker, which means DDEV REWRITES IT ON EVERY
+	# RESTART. An edit made without removing that marker survives exactly until the next `ddev
+	# restart`, silently, and the sync exclusion this whole strategy depends on quietly stops
+	# existing. So grove takes ownership of the file by dropping the marker, which is ddev's own
+	# documented way of saying "this one is mine now".
 	if [ -f "$f" ]; then
-		# Never rewrite a file the project may have tuned by hand; say exactly what to add instead.
-		printf '  %s exists — add these under sync.defaults.ignore.paths:\n' "${f#"$MAIN_ROOT"/}"
-		while IFS= read -r rel; do
-			[ -n "$rel" ] || continue
-			printf '      - "/%s/*/%s"\n' "$WORKTREES_REL" "$rel"
-		done <<EOF
+		local tmp owned=""
+		tmp="$(mktemp)" || return 1
+		grep -q '^#ddev-generated' "$f" && owned=" (took ownership from ddev — its marker regenerated the file on every restart)"
+		awk -v b="$GROVE_EXCLUDE_BEGIN" -v e="$GROVE_EXCLUDE_END" -v add="$paths" -v wt="$WORKTREES_REL" '
+			/^#ddev-generated/ { next }
+			$0 ~ b { skip = 1 }
+			skip && $0 ~ e { skip = 0; next }
+			skip { next }
+			{ print }
+			!done && /^[[:space:]]*ignore:[[:space:]]*$/ { seen_ignore = 1 }
+			seen_ignore && !done && /^[[:space:]]*paths:[[:space:]]*$/ {
+				print "        " b
+				n = split(add, a, "\n")
+				for (i = 1; i <= n; i++) if (a[i] != "") printf "        - \"/%s/*/%s\"\n", wt, a[i]
+				print "        " e
+				done = 1
+			}
+		' "$f" >"$tmp"
+
+		if grep -q "$GROVE_EXCLUDE_BEGIN" "$tmp"; then
+			cat "$tmp" >"$f"; rm -f "$tmp"
+			printf '  updated %s%s\n' "${f#"$MAIN_ROOT"/}" "$owned"
+			printf '  %-8s ddev mutagen reset   (a changed ignore list needs it; restart alone reuses the session)\n' "then:"
+		else
+			rm -f "$tmp"
+			printf '  %s has no ignore.paths list to extend — add these by hand:\n' "${f#"$MAIN_ROOT"/}"
+			while IFS= read -r rel; do
+				[ -n "$rel" ] || continue
+				printf '      - "/%s/*/%s"\n' "$WORKTREES_REL" "$rel"
+			done <<EOF
 $paths
 EOF
+		fi
 		return 0
 	fi
 

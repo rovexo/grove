@@ -37,11 +37,36 @@ git clone https://github.com/rovexo/grove ~/grove
 
 ## Use
 
+**Public hosting** — one wildcard per zone, one proxy block per project:
+
 | | |
 |---|---|
 | `grove status` | what is in place and what is not. No root. |
 | `grove cert` | issue or renew the zone's wildcard over DNS-01. No root. |
-| `sudo grove install` | claim this project's hosts in the proxy + install the renewal timer. **One sudo, once.** |
+| `sudo grove publish` | claim this project's hosts in the proxy + install the renewal timer. **One sudo, once.** |
+
+**Worktrees** — one isolated checkout, database and URL per session:
+
+| | |
+|---|---|
+| `grove create <name>` | branch + worktree + site. No sudo, no prompts. |
+| `grove list` | every worktree: branch, URL, database, idle time |
+| `grove info <name>` | paths, URL, database, commits still to land |
+| `grove shell <name> [cmd]` | run in that worktree, inside the container |
+| `grove provision <name>` | give a site-less worktree its site after the fact |
+| `grove sync-db <name>` | re-seed its database from the main one |
+| `grove merge <name> [--keep]` | land the work; release the slot unless `--keep` |
+| `grove remove <name> [-f]` | release without merging |
+| `grove prune-merged` | delete worktree branches whose commits have all landed |
+| `grove wire` | derive the vhost, the hostnames and the sync-ignore list |
+
+**But an AI session never types any of those.** Claude Code fires a hook, and the session is *moved*
+into a worktree and has to be *told* where it landed — so grove ships the hook entry points and
+`grove wire` prints the four lines that go in `.claude/settings.json`:
+
+```
+grove hook create | remove | context | on-edit
+```
 
 ## What is project-specific
 
@@ -70,13 +95,30 @@ Linux port means systemd units and `ip -o -4 addr` — nothing else would change
 Nothing is edited in place: the new Caddyfile is staged in a temp file and adapted by Caddy first,
 so a config that does not parse never reaches the live proxy.
 
-## Not yet packaged
+## Every path declares how it exists
 
-The worktree lifecycle — slot allocation, per-worktree database and vhost, the create/remove hooks —
-still lives in each project, copy-pasted four times and already diverged.
+A worktree is not a checkout: it needs the uploads directory, an empty cache, the dependencies and a
+database. Rather than two hardcoded lists — things to copy, things to create — each path names a
+**strategy**, and everything else is derived from that one declaration.
 
-[`docs/CONCEPT-worktrees.md`](docs/CONCEPT-worktrees.md) is the design for absorbing it: every path
-declares *how* it exists in a worktree (`clone`, `empty`, `link`, `container`, `skip`) rather than
-appearing on one of two hardcoded lists, which turns Magento's "vendor copied container-side and
-excluded from file sync" from a special case into one word — and lets grove derive the sync-ignore
-list from it instead of having the same fact written down twice.
+```sh
+GROVE_PATHS+=(
+    "pub/media:clone"       # copy-on-write clone, host-side — free on APFS
+    "var/cache:empty"       # created, never copied
+    "node_modules:link"     # relative symlink to the main checkout
+    "vendor:container"      # copied INSIDE the container, excluded from file sync
+    "generated:fresh"       # a GROVE_POST_CREATE command produces it
+)
+```
+
+`container` is the one that earns it. A Magento `vendor/` is ~80k files: cloning it host-side is
+instant, and then the file sync has to propagate all 80k into the container and watch them forever.
+Copying it where it already lives and excluding it from sync removes both — and grove writes that
+exclusion **from this list**, so the copy and the exclusion cannot drift apart.
+
+Platform defaults come from a **profile** (`joomla`, `wordpress`, `magento2`, `plain`), which is just
+a shell file sourced before your `.grove.conf`. Overriding is plain assignment, extending is `+=`,
+later wins — because that is what shell does. Two Magento projects here differ only in `docroot`.
+
+[`docs/CONCEPT-worktrees.md`](docs/CONCEPT-worktrees.md) is the full design record, including the
+four things that only turned up once it was built and run.

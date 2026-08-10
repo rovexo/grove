@@ -1,6 +1,8 @@
 # Concept: grove takes over worktree management
 
-> Status: proposal. Nothing implemented. Targets grove 0.2.
+> Status: **built and shipped in grove 0.2.** This document is kept as the design record — the
+> reasoning behind the strategies is still the best explanation of why the code looks the way it
+> does. Section 8 records what building it changed.
 
 Today grove owns the *public* half — one wildcard per zone, one proxy block per project. The worktree
 half lives in each project, and it has been copy-pasted four times: cbx-joomla, cbx-wordpress,
@@ -147,7 +149,12 @@ grove merge <name> [--keep]  land the work: merge the branch AND the submodule b
                              bump the pointer, then release the slot unless --keep
 grove remove <name> [-f]     release without merging
 grove prune-merged           delete worktree-* branches whose commits are all merged
+grove wire                   write everything section 5 derives, and print the hook wiring
 ```
+
+`wire` was not in the first draft and had to exist: section 5's derived artifacts are real files in
+the project, and something has to write them. It is also the migration entry point — run it once per
+project, restart the stack, delete the old scripts.
 
 `merge` and `prune-merged` were missing from the first draft and are the two an agent leans on most —
 `merge` is how a session's work gets back, and it is the fiddliest thing in the existing tooling
@@ -206,3 +213,45 @@ the most bespoke behaviour to lose.
 Both open decisions are settled; what remains above is mechanical. The next step is
 `profiles/magento2.sh` and `grove create`, proven against cbx-magento first — it carries the
 requirement that shaped the design, so it fails fastest if `container` is wrong.
+
+---
+
+## 8. What building it changed
+
+The design above survived implementation intact — the strategies, the shell config, the profiles and
+the hook-first command surface are all as written. What building it *added* was four things no amount
+of reasoning had surfaced, every one of them found by running the thing against a throwaway project
+rather than by reading it.
+
+**A `link` path is a loaded gun pointed at the main checkout.** A session runs `git add -A`, the
+symlink is staged, the merge lands it — and the main checkout's real `node_modules` is replaced by a
+symlink pointing at itself. The reason it is not caught by the obvious defence is worth remembering:
+`/node_modules/` in a `.gitignore` has a trailing slash, which matches a **directory** and not a
+**symlink**, so the ignore rule that looks like it covers this does not. grove now writes a managed
+block into the repository's local git excludes *before* any strategy runs, and `merge` refuses
+outright to carry a managed path across. Two independent defences, because the failure destroys work.
+
+**Everything grove creates must be invisible to the "is this worktree still busy?" check.** That
+check is what makes `WorktreeRemove` refuse to release a worktree holding unfinished work — so
+anything grove itself creates that reads as work occupies a slot forever and nothing gives it back.
+The subtlety is that the exclusion has to be limited to entries git reports as UNTRACKED; otherwise a
+project that genuinely tracks a file under a declared path would have real edits silently ignored.
+
+**`container` needs a matching teardown, and this is a correctness bug rather than housekeeping.**
+The sync is told to ignore those paths — so it will not carry their *deletion* either, and it refuses
+to remove a directory tree still holding ignored content. Removing a worktree host-side therefore
+strands the **entire** worktree inside the container. The obvious cost is garbage (one Magento
+`vendor/` per abandoned worktree, forever). The sharp cost is that the vhost goes on serving that
+stale copy at its URL, so the next session handed the same slot sees the previous session's files.
+grove purges the container-side directory on remove, and again on create for a reused slot.
+
+**A generated file has to know the generator's rules.** ddev marks the files it owns with
+`#ddev-generated` and rewrites them on every restart, so the sync-exclusion this design depends on
+would have survived exactly until the next `ddev restart` — silently. grove takes ownership by
+dropping the marker. It also cannot *mention* the marker in a comment, because the scan that looks
+for it does not care that it is inside one.
+
+The pattern common to all four: **the strategies were right, and their lifecycles were missing.**
+Declaring how a path comes into existence turned out to be only half of it — every strategy also owes
+an answer to what happens when the worktree goes away, and what git and the file sync each believe
+about the path in the meantime.

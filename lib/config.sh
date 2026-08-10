@@ -102,17 +102,30 @@ CADDYFILE="${GROVE_CADDYFILE:-/usr/local/etc/caddy/Caddyfile}"
 CADDY_LABEL="${GROVE_CADDY_LABEL:-com.caddyserver.caddy}"
 CADDY_PLIST="${GROVE_CADDY_PLIST:-/Library/LaunchDaemons/${CADDY_LABEL}.plist}"
 
+# Everything that contributes to the served configuration for this project: the machine's Caddyfile,
+# plus our own imported site file.
+#
+# BOTH, always. In rootless mode the zone block does not live in the Caddyfile at all — it lives in
+# the imported site file, and the Caddyfile holds nothing but an `import` line. A check that read
+# only the first reported "caddy site block missing" for a project that was serving perfectly, and
+# told the reader to run `sudo grove publish` to fix a problem that did not exist.
+grove_caddy_cat() {
+	cat "$CADDYFILE" 2>/dev/null
+	[ -f "$SITE_FILE" ] && cat "$SITE_FILE" 2>/dev/null
+	return 0
+}
+
 # The port the zone block's DEFAULT reverse_proxy points at — i.e. which project owns the zone when
 # no matcher applies. Used by status (is this project routed at all?) and by install (is it already
 # the default, in which case it needs no matcher).
 caddyfile_default_port() {
-	awk -v z="^${ZONE//./\\.}[ ,]" '
+	grove_caddy_cat | awk -v z="^${ZONE//./\\.}[ ,]" '
 		$0 ~ z {inz = 1}
 		inz && /^[[:space:]]*reverse_proxy [^@]/ {
 			if (match($0, /127\.0\.0\.1:[0-9]+/)) { print substr($0, RSTART + 10, RLENGTH - 10); exit }
 		}
 		inz && /^}/ {inz = 0}
-	' "$CADDYFILE" 2>/dev/null
+	' 2>/dev/null
 }
 
 # --- derived --------------------------------------------------------------------------------
