@@ -46,6 +46,18 @@ certificate.
 already has one, point `CBX_CADDYFILE`/`CBX_CADDY_LABEL` at it: `install` then claims a host matcher
 inside its existing block for the zone instead of adding a competing block.
 
+## Requirements
+
+macOS (launchd + `ipconfig`); the tool refuses to run elsewhere rather than failing obscurely. A
+Linux port means systemd units and `ip -o -4 addr` — nothing else would change. Needs `caddy`,
+`lego`, `dig`, `openssl` and `awk`; each subcommand checks the ones it uses and says what to install.
+
+`install` bootstraps a machine that has **no** Caddy at all — it writes the Caddyfile and the daemon
+— and joins one that already has it, claiming a host matcher inside the existing zone block.
+
+Nothing is edited in place: the new Caddyfile is staged in a temp file and adapted by Caddy first,
+so a config that does not parse never reaches the live proxy.
+
 ## Not yet packaged
 
 The worktree lifecycle itself — slot allocation, per-worktree database and vhost, the create/remove

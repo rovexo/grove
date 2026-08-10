@@ -9,6 +9,15 @@
 # CADDYFILE CADDY_LABEL CADDY_PLIST SECRETS CERT_DIR LEGO_DIR CRT KEY DAEMON_LABEL DAEMON_PLIST
 # RENEW_SCRIPT REAL_USER REAL_HOME.
 
+# --- platform ------------------------------------------------------------------------------------
+# macOS only, and said out loud rather than discovered through a confusing failure: the daemons are
+# launchd plists and the address lookup is ipconfig/ifconfig. A Linux port means systemd units and
+# `ip -o -4 addr`; nothing else here would have to change.
+if [ "$(uname -s)" != "Darwin" ]; then
+	printf 'error: cbx-worktree-sites is macOS-only (launchd + ipconfig). Detected: %s\n' "$(uname -s)" >&2
+	exit 1
+fi
+
 # --- where the project is -------------------------------------------------------------------------
 # Walk up from the caller until a .cbx-sites.conf turns up, so the tool works from any subdirectory
 # (and from vendor/bin, which is a symlink into the package).
