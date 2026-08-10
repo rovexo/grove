@@ -54,6 +54,19 @@ CADDYFILE="${CBX_CADDYFILE:-/usr/local/etc/caddy/Caddyfile}"
 CADDY_LABEL="${CBX_CADDY_LABEL:-com.caddyserver.caddy}"
 CADDY_PLIST="${CBX_CADDY_PLIST:-/Library/LaunchDaemons/${CADDY_LABEL}.plist}"
 
+# The port the zone block's DEFAULT reverse_proxy points at — i.e. which project owns the zone when
+# no matcher applies. Used by status (is this project routed at all?) and by install (is it already
+# the default, in which case it needs no matcher).
+caddyfile_default_port() {
+	awk -v z="^${ZONE//./\\.}[ ,]" '
+		$0 ~ z {inz = 1}
+		inz && /^[[:space:]]*reverse_proxy [^@]/ {
+			if (match($0, /127\.0\.0\.1:[0-9]+/)) { print substr($0, RSTART + 10, RLENGTH - 10); exit }
+		}
+		inz && /^}/ {inz = 0}
+	' "$CADDYFILE" 2>/dev/null
+}
+
 # --- derived --------------------------------------------------------------------------------
 # Whose home holds the certificate. NOT $HOME: this runs as you, under sudo, and from a root timer
 # via `sudo -u you`. In that last case sudo sets SUDO_USER to *root*, so the naive

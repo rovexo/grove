@@ -64,7 +64,22 @@ load_token() {
 	export "$var=$value"
 }
 
+# Every external command this tool shells out to, checked up front with a message that says what
+# to install. Without this the failures are indirect and misleading: a missing `dig` makes the DNS
+# check report "does NOT resolve" for a zone that resolves fine, and a missing `caddy` gets as far
+# as EDITING the proxy config before failing to validate it.
+require_tools() { # <tool:hint> ...
+	local missing=0 spec name hint
+	for spec in "$@"; do
+		name="${spec%%:*}"; hint="${spec#*:}"
+		command -v "$name" >/dev/null 2>&1 || { bad "$name is not installed — $hint"; missing=1; }
+	done
+	[ "$missing" -eq 0 ] || die "install the tools above and try again"
+}
+
 cmd_status() {
+	require_tools "dig:part of bind-tools (brew install bind)" "openssl:check your PATH"
+
 	printf '\n  %sPublic hosting — %s%s\n\n' "$C_BOLD" "$ZONE" "$C_OFF"
 
 	local ip; ip="$(lan_ip)"
@@ -93,6 +108,13 @@ cmd_status() {
 	fi
 
 	if grep -qs "$ZONE" "$CADDYFILE" 2>/dev/null; then
+		# The zone block existing is not the same as THIS project being routed by it. A second
+		# project on an established zone sees the block already there and must still claim its
+		# hosts, so report the two facts separately.
+		local mine="no"
+		grep -q "$HOST_PATTERN" "$CADDYFILE" && mine="matcher"
+		[ "$(caddyfile_default_port)" = "$UPSTREAM_PORT" ] && mine="default upstream"
+
 		local bound; bound="$(caddyfile_bound_ip)"
 		if [ -n "$bound" ] && [ -n "$ip" ] && [ "$bound" != "$ip" ]; then
 			# DHCP moved the machine. Caddy is still bound to (or failing to bind) the old address
@@ -100,7 +122,11 @@ cmd_status() {
 			bad "caddy bound to $bound but this machine is $ip — re-run: sudo vendor/bin/cbx-public-host install"
 			warn "give this machine a DHCP reservation so it stops moving"
 		else
-			ok "caddy site block present${bound:+, bound to $bound}"
+			if [ "$mine" = "no" ]; then
+				bad "caddy $ZONE block exists but does NOT route $PROJECT — run: sudo vendor/bin/cbx-public-host install"
+			else
+				ok "caddy routes $PROJECT ($mine)${bound:+, bound to $bound}"
+			fi
 		fi
 	else
 		bad "caddy site block missing — run: sudo vendor/bin/cbx-public-host install"
@@ -111,7 +137,7 @@ cmd_status() {
 
 	[ -f "$DAEMON_PLIST" ] && ok "renewal timer installed (zone-wide)" || bad "renewal timer missing (installed by \`install\`)"
 
-	printf '\n  Try:  curl -sI https://wt2-cbx-joomla.%s/ | head -1\n\n' "$ZONE"
+	printf '\n  Try:  curl -sI https://wt1-%s.%s/ | head -1\n\n' "$PROJECT" "$ZONE"
 }
 
 # Issue or renew — one command for both.
@@ -121,7 +147,7 @@ cmd_status() {
 # documented as "Get or renew a certificate" and decides for itself, so this is safe to call from a
 # daily timer and is a no-op until renewal is actually due.
 cmd_cert() {
-	command -v lego >/dev/null || die "lego is not installed (brew install lego)"
+	require_tools "lego:brew install lego" "openssl:should be present on macOS; check your PATH"
 	load_token
 	mkdir -p "$LEGO_DIR" "$CERT_DIR/certs"
 
@@ -156,7 +182,11 @@ cmd_cert() {
 cmd_install() {
 	[ "$(id -u)" -eq 0 ] || die "run this one with sudo:  sudo vendor/bin/cbx-public-host install"
 	[ -f "$CRT" ] || die "no certificate yet — run (as yourself):  vendor/bin/cbx-public-host cert"
-	[ -f "$CADDYFILE" ] || die "no Caddyfile at $CADDYFILE"
+	require_tools "caddy:brew install caddy" "awk:check your PATH" "launchctl:macOS only — no systemd support"
+
+	# NOTE: this joins an EXISTING proxy. There is no bootstrap for a machine that has no Caddy at
+	# all yet — see the README.
+	[ -f "$CADDYFILE" ] || die "no Caddyfile at $CADDYFILE — this tool joins an existing Caddy, it does not install one"
 
 	local ip changed=0
 	ip="$(lan_ip)" || die "could not determine this machine's LAN address — refusing to write a config that would bind ALL interfaces"
@@ -166,13 +196,7 @@ cmd_install() {
 	# project on a zone: it owns the block and needs no matcher — a matcher is only required once a
 	# SECOND project joins. Getting this wrong inserted a redundant matcher, and into the wrong
 	# block at that.
-	local zone_default_port
-	zone_default_port="$(awk -v z="^${ZONE//./\\.}[ ,]" '
-		$0 ~ z {inz=1} inz && /^[[:space:]]*reverse_proxy [^@]/ {
-			if (match($0, /127\.0\.0\.1:[0-9]+/)) { print substr($0, RSTART+10, RLENGTH-10); exit }
-		}
-		inz && /^}/ {inz=0}
-	' "$CADDYFILE" 2>/dev/null)"
+	local zone_default_port; zone_default_port="$(caddyfile_default_port)"
 
 	if grep -q "$HOST_PATTERN" "$CADDYFILE"; then
 		warn "$PROJECT already claims $HOST_PATTERN — leaving the Caddyfile alone"
