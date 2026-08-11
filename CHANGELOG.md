@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.2.5 — 2026-08-11
+
+Found by standing up a real Magento 2.4.7 store from scratch — composer install, `setup:install`,
+OpenSearch, `vendor/` kept out of the file sync — and putting a second project on an already-served
+zone. **Multi-project-per-zone had never actually worked**, and its failure was silent.
+
+- **The proxy matcher matched nothing.** Caddy's `host` matcher supports a wildcard only as an entire
+  leading label, so `*-project.zone.tld` parses and then matches no request at all: everything fell
+  through to whichever project served the zone by default. The second project on a zone answered
+  **200 with the first project's site** — a working-looking setup serving the wrong thing. grove now
+  enumerates the concrete slot hostnames, which Caddy matches exactly.
+- **And it could not have claimed one anyway**: a mid-label wildcard is not a valid certificate
+  subject, so `*-project.zone.tld` as a site address is rejected outright — even with the certificate
+  supplied explicitly.
+- **Site blocks are per ZONE, not per project.** Caddy permits one definition of a site, so two
+  projects each owning a file redefined it and the whole config was rejected with "ambiguous site
+  definition". Existing installs are migrated by finding the file that defines the zone and renaming
+  it; projects then share that block and add matchers to it.
+- **A project could not see the other projects on its machine.** The config reader took the machine
+  Caddyfile plus the project's OWN site file — so a second project could not tell the zone was
+  already served, and generated a colliding block. It now reads every imported site file.
+- **A profile can act on what the platform keeps in its DATABASE**, via a new post-seed hook. Magento
+  stores its base URLs there and redirects anything that does not match: a worktree inherited the main
+  store's local hostname and answered every public request with a 302 to a name that resolves only on
+  the machine. Up and unreachable at once.
+- **Magento static assets 404'd.** `pub/static` is an `empty` path, so every asset is generated on
+  demand by `static.php` — which wants the resource without the `/static/` prefix or version segment.
+  The locations now follow Magento's own nginx sample.
+
 ## 0.2.4 — 2026-08-11
 
 Everything here was found by running the `magento2` profile for the first time, against a checkout

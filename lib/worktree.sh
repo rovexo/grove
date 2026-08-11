@@ -788,6 +788,17 @@ grove_provision() { # <name>
 	fi
 
 	grove_write_site_config "$name" || grove_log "WARN: could not write the worktree's site config"
+
+	# Anything the platform keeps in its DATABASE rather than its config file. Magento's base URLs are
+	# the case that forced this: the seed rewrites hostnames textually, so a worktree inherits whatever
+	# shape the MAIN store used — and if that is the local name, the platform redirects every public
+	# request straight back to a hostname that only resolves on this machine. Textual rewriting cannot
+	# fix that; it needs a statement about what the worktree's canonical URL now is.
+	if command -v grove_profile_post_seed >/dev/null 2>&1; then
+		grove_profile_post_seed "$MAIN_ROOT" "$(grove_wt_dir "$name")" "$name" \
+			"$(grove_wt_db "$name")" "$(grove_wt_url "$name")" "https://$(grove_wt_local_host "$name")" \
+			|| grove_log "WARN: the profile's post-seed step failed"
+	fi
 	# A failed `container` copy IS a failed provision, not a warning: for the platform this strategy
 	# exists for, a missing vendor/ means the site cannot boot at all. Failing here keeps the marker
 	# in place so the next file change retries.
@@ -1290,6 +1301,13 @@ grove_sync_db() { # <name>
 	printf 'Re-seeding %s from %s …\n' "$(grove_wt_db "$name")" "$(grove_main_db)"
 	grove_db_seed "$name" || { printf 'error: seeding failed\n' >&2; return 1; }
 	grove_write_site_config "$name"
+	# Same reason as in provision: a textual hostname rewrite cannot say what the worktree's canonical
+	# URL now IS, and re-seeding restores the main store's answer to that question.
+	if command -v grove_profile_post_seed >/dev/null 2>&1; then
+		grove_profile_post_seed "$MAIN_ROOT" "$(grove_wt_dir "$name")" "$name" \
+			"$(grove_wt_db "$name")" "$(grove_wt_url "$name")" "https://$(grove_wt_local_host "$name")" \
+			|| grove_log "WARN: the profile's post-seed step failed"
+	fi
 	printf 'Done — %s\n' "$(grove_wt_url "$name")"
 }
 

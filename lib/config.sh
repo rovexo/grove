@@ -124,9 +124,21 @@ CADDY_PLIST="${GROVE_CADDY_PLIST:-/Library/LaunchDaemons/${CADDY_LABEL}.plist}"
 # the imported site file, and the Caddyfile holds nothing but an `import` line. A check that read
 # only the first reported "caddy site block missing" for a project that was serving perfectly, and
 # told the reader to run `sudo grove publish` to fix a problem that did not exist.
+# EVERY imported site file, not just ours. In the rootless layout the machine's Caddyfile holds
+# nothing but `import` lines, and each project's block lives in its own file in the imported
+# directory — so a project reading only the Caddyfile and its OWN file is blind to every other
+# project on the machine.
+#
+# That blindness had a specific and total consequence: the SECOND project to join a zone could not
+# see that the zone was already served, concluded it was unclaimed, and generated a full zone block
+# of its own. Caddy then refused the combined config with "ambiguous site definition" — so joining an
+# established zone, which is the entire multi-project story, failed every time.
 grove_caddy_cat() {
 	cat "$CADDYFILE" 2>/dev/null
-	[ -f "$SITE_FILE" ] && cat "$SITE_FILE" 2>/dev/null
+	if [ -d "$SITES_DIR" ]; then
+		# `cat dir/*.caddy` would print a literal glob when the directory is empty; find handles it.
+		find "$SITES_DIR" -maxdepth 1 -name '*.caddy' -exec cat {} + 2>/dev/null
+	fi
 	return 0
 }
 
@@ -173,9 +185,32 @@ RENEW_SCRIPT="$CERT_DIR/renew.sh"
 # --- per-project behaviour knobs ------------------------------------------------------------------
 # These change what the binary WRITES for this project, without touching the zone-wide parts.
 
-# The host pattern this project claims. Defaults to the flat form; override only if a project needs
-# to answer on something else (a bare vanity name, say). Must still be ONE label under the zone.
+# The host pattern this project claims, for display and for documentation. Every name it covers is
+# ONE label under the zone, which is what the wildcard certificate and the wildcard DNS record match.
 HOST_PATTERN="${GROVE_HOST_PATTERN:-*-${PROJECT}.${ZONE}}"
+
+# The CONCRETE hostnames the proxy matches on — and they must be concrete.
+#
+# Caddy's `host` matcher supports a wildcard only as an entire leading label (`*.example.com`). A
+# wildcard inside a label, like `*-project.example.com`, is accepted by the parser and then matches
+# NOTHING: every request falls through to whatever serves the zone by default. That failure is
+# silent and total — the second project on a zone answers 200 with the FIRST project's site, which
+# looks like a working setup until you read the page.
+#
+# Slots are finite and grove knows how many, so the honest answer is to enumerate them. Raising
+# GROVE_SLOTS therefore needs another `grove publish`, which `status` checks for.
+grove_host_list() {
+	local i out=""
+	i=1
+	while [ "$i" -le "${GROVE_SLOTS:-5}" ]; do
+		out="$out wt$i-${PROJECT}.${ZONE}"
+		i=$((i + 1))
+	done
+	printf '%s' "${out# }"
+}
+
+# One representative name, for "is this project routed at all?" checks.
+HOST_FIRST="wt1-${PROJECT}.${ZONE}"
 
 # How the proxy talks to this stack. DDEV terminates TLS on its own port, so https is the default;
 # a plain-http stack sets this to http and the transport block is omitted.
@@ -213,7 +248,23 @@ zone_projects() { [ -f "$ZONE_REGISTRY" ] && cut -f1 "$ZONE_REGISTRY" | tr '\n' 
 #
 # It costs one root edit, once, ever — see `grove status`, which prints it.
 SITES_DIR="${GROVE_SITES_DIR:-$REAL_HOME/.config/grove/sites}"
-SITE_FILE="$SITES_DIR/${PROJECT}.caddy"
+
+# ONE FILE PER ZONE, not per project.
+#
+# A zone is a single Caddy site block — `zone.tld, *.zone.tld` — and Caddy allows exactly one
+# definition of it. Projects therefore share the block and distinguish themselves with host matchers
+# inside it; they cannot each own a file, because the second file would redefine the same site and
+# Caddy rejects the pair with "ambiguous site definition".
+#
+# Nor can a project claim `*-project.zone.tld` as a site address of its own: a wildcard in the middle
+# of a label is not a valid certificate subject, and Caddy refuses it outright — "subject does not
+# qualify for certificate" — even when the certificate is supplied explicitly. As a host MATCHER the
+# very same pattern is fine, which is the whole reason the matcher form exists here.
+ZONE_SITE_FILE="$SITES_DIR/${ZONE}.caddy"
+
+# The pre-0.2.5 per-project name, kept only so an existing install can be migrated to the above.
+SITE_FILE_LEGACY="$SITES_DIR/${PROJECT}.caddy"
+SITE_FILE="$ZONE_SITE_FILE"
 ADMIN="${GROVE_CADDY_ADMIN:-localhost:2019}"
 
 # Does the machine's Caddyfile pull in our directory?
