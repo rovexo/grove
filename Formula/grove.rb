@@ -1,8 +1,8 @@
 class Grove < Formula
   desc "Per-worktree dev sites on real public HTTPS subdomains behind one wildcard certificate"
   homepage "https://github.com/rovexo/grove"
-  url "https://github.com/rovexo/grove/archive/refs/tags/v0.2.4.tar.gz"
-  sha256 "e48b48fb87a1f5f07f6742e46e73ff753d67b36f3d8bedb6cc85d77c5d79edd7"
+  url "https://github.com/rovexo/grove/archive/refs/tags/v0.2.5.tar.gz"
+  sha256 "36aef1b05911d79b99fd10a87ec57c69c61771256d654be4ae46799c850996d7"
   license "MIT"
 
   # System tools grove shells out to. Homebrew is the right packager precisely because it can
