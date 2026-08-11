@@ -47,7 +47,22 @@ PROJECT_ROOT="$(grove_find_project_root "${GROVE_PROJECT_ROOT:-$PWD}")" || {
 #
 # Which profile to load is itself a setting in the project file, so it is read first — in a SUBSHELL,
 # so a config with a side effect in it does not run that side effect twice.
-GROVE_PLATFORM="$(. "$PROJECT_ROOT/.grove.conf" >/dev/null 2>&1; printf '%s' "${GROVE_PLATFORM:-plain}")"
+#
+# GROVE_APP_ROOT comes with it, because a profile cannot express its paths without knowing where the
+# application actually starts. Two Magento checkouts here prove the point: one IS the Magento root,
+# the other keeps Magento under docroot/ — so `vendor`, `generated`, `var/` and `app/etc/env.php` all
+# shift by that one prefix. A profile that hardcodes either shape is wrong for the other, and the
+# error is not subtle: it looks for a config file that does not exist and copies a directory that
+# does not exist.
+eval "$(
+	. "$PROJECT_ROOT/.grove.conf" >/dev/null 2>&1
+	printf 'GROVE_PLATFORM=%q\nGROVE_APP_ROOT=%q\n' "${GROVE_PLATFORM:-plain}" "${GROVE_APP_ROOT:-}"
+)"
+
+# The application root as a path PREFIX, ready to paste in front of a relative path: either empty or
+# "something/". Profiles build every path they declare out of this.
+GROVE_APP_ROOT="${GROVE_APP_ROOT%/}"
+GROVE_APP="${GROVE_APP_ROOT:+${GROVE_APP_ROOT}/}"
 
 # Declared before anything appends to them: `GROVE_PATHS+=(…)` in a profile or a project file must
 # extend a real array, and `${#GROVE_PATHS[@]}` on a never-declared name is an error under `set -u`
@@ -256,6 +271,9 @@ SUBMODULE="${GROVE_SUBMODULE:-}"
 
 DB_SEED="${GROVE_DB_SEED:-clone}"      # clone | empty | none
 DB_GRANT="${GROVE_DB_GRANT:-shared}"   # shared (the stack's own user) | own (per-worktree user)
+
+# The platform config file a profile rewrites per worktree, if any. Never counted as session work.
+CONFIG_FILE="${GROVE_CONFIG_FILE:-}"
 
 BRANCH_PREFIX="${GROVE_BRANCH_PREFIX:-worktree-}"
 

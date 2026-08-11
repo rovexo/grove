@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.2.4 — 2026-08-11
+
+Everything here was found by running the `magento2` profile for the first time, against a checkout
+carrying a real 79,252-file `vendor/`. The profile had never been loaded before; three of these four
+bugs make it useless on Magento specifically, and every one of them is invisible with a single
+`container` path.
+
+- **`GROVE_APP_ROOT`.** Magento is not always at the repository root — one project here is the Magento
+  checkout, another keeps it under `docroot/`. Every profile path now hangs off that prefix. Without
+  it the profile looked for an `app/etc/env.php` that does not exist and copied a `vendor` that does
+  not exist. The concept's "they differ only in docroot" was simply wrong.
+- **Only the first `container` path was ever copied.** `ddev exec` reads stdin, and the loop feeds its
+  list in on stdin — so the exec swallowed the remaining paths and the loop ended after one. Magento
+  always has two (`vendor` and `generated`), so this broke exactly the platform the strategy exists
+  for, while working perfectly with one path.
+- **The sync-ignore splice silently did nothing with more than one path.** `awk -v` cannot carry an
+  embedded newline; it aborts with "newline in string". Same shape as above: fine with one path,
+  broken with two.
+- **A tracked platform config file made every worktree permanently dirty**, so the remove hook would
+  never release the slot. Profiles now declare the file they rewrite, and grove never counts its own
+  rewrite as the session's work. (All three real projects gitignore it, so this was latent.)
+- The magento2 profile also rewrites Redis/cache `id_prefix` per worktree — two Magento sites sharing
+  a prefix read each other's cached configuration.
+
+Measured, since the design rested on an unmeasured claim: a host-side CoW clone of 79k files is
+**52-60s**, not "instant" — copy-on-write shares the data but still creates 79k inodes. The
+container-side copy is **45s** for the same tree. Comparable up front; the difference is that the
+container copy adds nothing to the sync's watch set, per worktree, for the worktree's life.
+
 ## 0.2.3 — 2026-08-11
 
 **The renewal timer has never renewed anything.** It called `$PROJECT_ROOT/grove cert` — a path from

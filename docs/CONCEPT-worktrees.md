@@ -107,8 +107,16 @@ This is the test of whether the abstraction is real.
 | submodule worktree | `com_configbox` | plugin dir | `cbx/` | — |
 | post-create | — | — | `di:compile`, `cache:flush` | same |
 
-Two things this exposes. **The two Magento projects differ only in `docroot`** — so the profile does
-almost all the work and efka's file is three lines. And **`container` is empty for the two PHP-app
+**Correction, from building it.** The claim that "the two Magento projects differ only in `docroot`"
+was wrong, and wrong in a way that would have made the profile useless for one of them: they differ in
+the **application root**. efka *is* the Magento checkout; cbx-magento keeps Magento under `docroot/`
+with tests and tooling alongside. So `vendor`, `generated`, `var/` and `app/etc/env.php` all shift by
+that one prefix, and a profile hardcoding either shape looks for a config file that does not exist and
+copies a directory that does not exist. Hence `GROVE_APP_ROOT`, read in the same pre-pass as the
+profile name, with every profile path built from it. With that, the original claim becomes true: efka
+sets nothing, cbx-magento sets one line.
+
+The rest of what this table exposes still holds — the profile does almost all the work. And **`container` is empty for the two PHP-app
 projects**, which is right: Joomla and WordPress have no build-output directory worth the complexity.
 The strategy exists for the case that needs it and costs the others nothing.
 

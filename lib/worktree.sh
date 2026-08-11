@@ -134,6 +134,9 @@ grove_worktree_dirty() {
 		.claude/settings.json|.claude/hooks|.claude/hooks/*) continue ;;
 		esac
 		if [ -n "$SUBMODULE" ] && [ "$path" = "$SUBMODULE" ]; then continue; fi
+		# The platform config file, at ANY status rather than only untracked: grove rewrites it for
+		# every worktree, so its modification is grove's doing and never the session's.
+		if [ -n "$CONFIG_FILE" ] && [ "$path" = "$CONFIG_FILE" ]; then continue; fi
 
 		if [ "$status" = "??" ]; then
 			keep=1
@@ -217,6 +220,7 @@ grove_write_excludes() {
 		printf '%s\n' "$GROVE_EXCLUDE_BEGIN"
 		printf '/%s/\n' "${WORKTREES_REL#/}"
 		printf '/WORKTREE-SITE.md\n/CLAUDE.local.md\n/.grove-meta\n/.grove-provision-pending\n/.grove-provision-lock\n'
+		[ -n "$CONFIG_FILE" ] && printf '/%s\n' "$CONFIG_FILE"
 		while IFS= read -r rel; do
 			[ -n "$rel" ] || continue
 			printf '/%s\n' "$rel"
@@ -479,7 +483,12 @@ grove_container_copies() { # <name>
 		# Cleared first rather than merged into: a slot can be reused, and `cp -a` over a previous
 		# session's tree would leave that session's files behind wherever the new one has none.
 		cmd="rm -rf '$cdir/$rel' && mkdir -p '$cdir/$rel' && cp -a '$CONTAINER_ROOT/$rel/.' '$cdir/$rel/' 2>/dev/null"
-		if grove_stack_exec "$cmd" >/dev/null 2>&1; then
+		# `</dev/null` is load-bearing. The list being iterated arrives on STDIN via the heredoc
+		# below, and `ddev exec` reads stdin — so without this it swallows every remaining line and
+		# the loop ends after the FIRST path, silently. One `container` path works perfectly; two do
+		# not, which means it works everywhere except the platform the strategy exists for, since
+		# Magento's vendor and generated always come as a pair.
+		if grove_stack_exec "$cmd" </dev/null >/dev/null 2>&1; then
 			grove_log "container-side copy: $rel"
 		else
 			grove_log "WARN: container-side copy of $rel failed"
@@ -1429,7 +1438,26 @@ grove_wire_sync() {
 		local tmp owned=""
 		tmp="$(mktemp)" || return 1
 		grep -q '^#ddev-generated' "$f" && owned=" (took ownership from ddev — its marker regenerated the file on every restart)"
-		awk -v b="$GROVE_EXCLUDE_BEGIN" -v e="$GROVE_EXCLUDE_END" -v add="$paths" -v wt="$WORKTREES_REL" '
+		# The block is built in shell and spliced in FROM A FILE, never handed to `awk -v`.
+		#
+		# awk's -v processes escape sequences and cannot carry an embedded newline at all: given a
+		# multi-line value it aborts with "newline in string" and the splice silently does nothing.
+		# That is not an edge case — it is every project with more than ONE `container` path, which
+		# is to say every Magento project, since vendor and generated always come as a pair. With a
+		# single path it worked perfectly, which is exactly why it survived the first round of testing.
+		local block; block="$(mktemp)" || return 1
+		{
+			printf '        %s\n' "$GROVE_EXCLUDE_BEGIN"
+			while IFS= read -r rel; do
+				[ -n "$rel" ] || continue
+				printf '        - "/%s/*/%s"\n' "$WORKTREES_REL" "$rel"
+			done <<INNER
+$paths
+INNER
+			printf '        %s\n' "$GROVE_EXCLUDE_END"
+		} >"$block"
+
+		awk -v b="$GROVE_EXCLUDE_BEGIN" -v e="$GROVE_EXCLUDE_END" -v blockfile="$block" '
 			/^#ddev-generated/ { next }
 			$0 ~ b { skip = 1 }
 			skip && $0 ~ e { skip = 0; next }
@@ -1437,13 +1465,12 @@ grove_wire_sync() {
 			{ print }
 			!done && /^[[:space:]]*ignore:[[:space:]]*$/ { seen_ignore = 1 }
 			seen_ignore && !done && /^[[:space:]]*paths:[[:space:]]*$/ {
-				print "        " b
-				n = split(add, a, "\n")
-				for (i = 1; i <= n; i++) if (a[i] != "") printf "        - \"/%s/*/%s\"\n", wt, a[i]
-				print "        " e
+				while ((getline line < blockfile) > 0) print line
+				close(blockfile)
 				done = 1
 			}
 		' "$f" >"$tmp"
+		rm -f "$block"
 
 		if grep -q "$GROVE_EXCLUDE_BEGIN" "$tmp"; then
 			cat "$tmp" >"$f"; rm -f "$tmp"

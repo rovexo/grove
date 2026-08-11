@@ -6,6 +6,7 @@
 # Sourced BEFORE the project's .grove.conf, so everything here is a default.
 
 GROVE_DOCROOT="docroot"
+GROVE_CONFIG_FILE="docroot/wp-config.php"
 
 GROVE_PATHS=(
 	# The media library: whatever the site has been given, which a session may add to.

@@ -8,6 +8,11 @@
 
 GROVE_DOCROOT="docroot"
 
+# The file grove_profile_write_config rewrites per worktree. Declared so grove never counts its own
+# rewrite as the session's work — otherwise a project that TRACKS this file has every worktree read
+# as permanently dirty, and the remove hook then refuses to release the slot for ever.
+GROVE_CONFIG_FILE="docroot/configuration.php"
+
 GROVE_PATHS=(
 	# Media the site serves and the session may add to. Big, and free on APFS.
 	"docroot/images:clone"
