@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.2.6 — 2026-08-11
+
+Both found by checking the public hostnames end to end after 0.2.5's matcher fix.
+
+- **`publish` now applies a changed slot count.** It saw its own matcher already present and stopped,
+  so raising `GROVE_SLOTS` never reached the proxy: the new slots stayed unclaimed and were answered
+  by whichever project owns the zone default — a 200 with another project's site. Its own block is
+  now stripped and rewritten, making publish idempotent AND able to apply changes.
+- **`status` checks that the published slots match the configured ones**, which a code comment had
+  claimed for a release without it being true. It names the gap (`wt4…wt5 would answer with whichever
+  project owns the zone default`) rather than leaving it to be discovered.
+
 ## 0.2.5 — 2026-08-11
 
 Found by standing up a real Magento 2.4.7 store from scratch — composer install, `setup:install`,

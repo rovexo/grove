@@ -49,7 +49,7 @@ case "${1:-}" in
 		printf '  grove hook create | remove | context | on-edit\n\n'
 		printf 'Reads .grove.conf from this directory or any parent.\n'
 		exit 0 ;;
-	-V|--version) printf 'grove 0.2.5\n'; exit 0 ;;
+	-V|--version) printf 'grove 0.2.6\n'; exit 0 ;;
 esac
 
 PKG_DIR="${GROVE_PKG_DIR:-$(cd "$(dirname "$(readlink "${BASH_SOURCE[0]}" || printf '%s' "${BASH_SOURCE[0]}")")/.." && pwd)}"
@@ -185,6 +185,19 @@ cmd_status() {
 			bad "caddy bound to $bound but this machine is $ip — re-run: sudo grove publish"
 			warn "give this machine a DHCP reservation so it stops moving"
 		else
+			# A project that claims a matcher claims CONCRETE slot hostnames, so raising GROVE_SLOTS
+			# without re-publishing leaves the new ones unclaimed — and an unclaimed name under the
+			# zone is served by whichever project owns the zone's default upstream. That is a 200
+			# with a different project's site, which is the least debuggable outcome available.
+			if [ "$mine" = "matcher" ]; then
+				local claimed
+				claimed="$(grove_caddy_cat | grep -oE "wt[0-9]+-${PROJECT}\.${ZONE//./\\.}" | sort -u | wc -l | tr -d ' ')"
+				if [ "${claimed:-0}" -lt "${GROVE_SLOTS:-5}" ]; then
+					bad "only $claimed of ${GROVE_SLOTS:-5} slots are claimed in the proxy — run: grove publish"
+					warn "wt$((claimed + 1))…wt${GROVE_SLOTS:-5} would answer with whichever project owns the zone default"
+				fi
+			fi
+
 			if [ "$mine" = "no" ]; then
 				bad "caddy $ZONE block exists but does NOT route $PROJECT — run: $(rootless_ready && printf 'grove publish' || printf 'sudo grove publish')"
 			else
@@ -312,9 +325,22 @@ cmd_install_rootless() {
 		zone_block "$ip" > "$SITE_FILE"
 	elif [ "$(caddyfile_default_port)" = "$UPSTREAM_PORT" ]; then
 		ok "$PROJECT is already the default upstream for $ZONE — no matcher needed"
-	elif grep -q -- "$HOST_FIRST" "$SITE_FILE"; then
-		ok "$PROJECT already claims $HOST_PATTERN in $(basename "$SITE_FILE")"
 	else
+		# Any previous block of OURS is stripped before the new one goes in, so publish is idempotent
+		# AND applies changes. Skipping when the project was already present looked harmless and was
+		# not: a raised GROVE_SLOTS then never reached the proxy, leaving the new slots unclaimed and
+		# answered by whichever project owns the zone default.
+		if grep -q -- "# $PROJECT — added by grove" "$SITE_FILE"; then
+			local stripped; stripped="$(mktemp)"
+			awk -v tag="# $PROJECT — added by grove" '
+				index($0, tag) { skipping = 1; next }
+				skipping && /^\t\}$/ { skipping = 0; next }
+				skipping { next }
+				{ print }
+			' "$SITE_FILE" > "$stripped"
+			cat "$stripped" > "$SITE_FILE"
+			rm -f "$stripped"
+		fi
 		# Anchored on the ZONE's own tls line: anchoring on the first tls in the file would drop the
 		# matcher into a different project's block.
 		local staged_site; staged_site="$(mktemp)"
