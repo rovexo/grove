@@ -247,6 +247,43 @@ The renewal job must do three things, and the middle one is the one people forge
 3. only bother the proxy when the certificate actually changed, so a daily no-op does not restart your
    only TLS front end 365 times a year.
 
+### Phase 6 — taking a project back off
+
+The inverse is not symmetrical with the install, and its steps only work in one order. Build it as a
+command rather than leaving it to be done by hand: every step below is easy to do, and easy to do in
+the wrong order or forget entirely, and two of them fail silently when you do.
+
+1. **Remove the project's matcher, then reload.** Stage and validate first, exactly as the install
+   does — a removal can produce an unparseable config as easily as an addition can.
+2. **Remove its row from whatever registry says who is on the zone**, in the same run. A registry that
+   still lists a project the proxy no longer routes is what makes the next teardown ambiguous.
+3. **If the project owned the DEFAULT upstream, something else has to take that position** — or every
+   name under the zone that is not one of the remaining matchers starts 404ing out of the proxy
+   itself. Promote another project by *moving* its block, not by generating a new one from a template:
+   only the block knows that project's real scheme, headers and transport.
+4. **Put the promoted default at the END of the site block.** A `reverse_proxy` with no matcher
+   matches every request and is terminal, so a promoted default sitting above another project's
+   matcher swallows that project's traffic completely — the same 200-with-the-wrong-site failure as a
+   matcher that matches nothing.
+5. **Only when the zone is empty: unload the renewal timer BEFORE deleting its plist.** `launchctl`
+   works from the label, not from the file. Delete the plist first and the job stays loaded until the
+   machine reboots — firing nightly into a renewal script that no longer exists.
+6. **Then the certificate store.** Never before the site block is gone: the block's `tls` line points
+   into that directory, and a proxy that cannot read its certificate does not come up at the next
+   restart — taking every other project on the machine with it, hours later, for a reason nothing on
+   screen connects to this.
+7. **Leave DNS alone.** The wildcard record is the user's, and one pointing at a private LAN address
+   serves nothing and costs nothing to keep.
+
+**Only step 5 needs root, and check that claim before you believe it about the others.** A root-owned
+file inside a directory you own is *yours to delete*: unlinking is a write to the **directory**, not
+to the file, so the renewal log root wrote does not make the certificate store a privileged removal.
+The daemon plist genuinely is one — `/Library/LaunchDaemons` is root's — so gate that step alone, do
+everything else unprivileged, and have the command name the one thing it could not finish. What it
+must never do is *assume* the removal worked: a store whose subdirectories were created by root (a
+`sudo` run of the ACME client, once) survives an unprivileged `rm -rf`, and reporting success over a
+certificate that is still on disk is worse than reporting the failure.
+
 ---
 
 ## 5. Traps, with their symptoms
@@ -271,6 +308,11 @@ Every one of these has actually happened. They are listed by how long they take 
 | Everything 502s after a reboot | The proxy came back (it is a system daemon); the container stack did not. Most dev tools do not auto-start. |
 |  A brand-new worktree's log, cache or tmp holds another site's content |  Those three were copied instead of created. Never copy them (Phase 1). |
 | A slot hostname 404s | Usually the worktree is simply gone. Check `git worktree list` before suspecting routing. |
+| After removing a project, every unclaimed name 404s from the proxy | The removed project owned the zone's **default** upstream. Promote another project into that position (Phase 6). |
+| After removing a project, a *different* project starts serving another's traffic | The promoted default was written above that project's matcher. A matcher-less `reverse_proxy` matches everything; it belongs at the end. |
+| A removed zone's renewal job still fires every night | The plist was deleted before `launchctl bootout`. It works from the label, so the job stays loaded until reboot. Bootout first. |
+| The proxy fails to start days after a zone was removed | Its certificate directory was deleted while a site block still pointed at it. Remove the block first. |
+| A teardown reports the certificate store removed, and it is still there | `rm -rf` cannot empty a subdirectory owned by root (an ACME client once run under `sudo`). It fails per entry and carries on; check that the directory is gone rather than trusting the command. |
 | Adding a project/provider/hostname breaks a `--check` build step | Some generated artifact enumerates them. Regenerate and commit; it is a two-step change. |
 
 ---
@@ -315,13 +357,18 @@ Then the one people skip: **create a brand-new worktree and time it.** It must n
 
 ## 7. Root, secrets, and what must never need them
 
-| Needs root | Once, at setup: the proxy site block, and installing the renewal timer. |
+| Needs root | Only what lives outside your own directories: the proxy site block until reloads go through the admin API, and the renewal timer's plist — installing it, and unloading it at the end. |
 |---|---|
 | Needs a secret | Once: the DNS provider API token, in a gitignored local file. Never in the repo. |
-| **Needs neither** | **Creating, using and removing a worktree — forever.** |
+| **Needs neither** | **Creating, using and removing a worktree — forever. Publishing and unpublishing a project. And deleting the zone's whole certificate store, root-owned log included.** |
 
 That last row is the whole point. Make setup a single idempotent command (`status` / `cert` / `install`)
 so the privileged part is one reviewable step, and make `status` print exactly what is still missing.
+
+The teardown deserves the same treatment, and for a sharper reason: it is done rarely, under time
+pressure, on a config shared with every other project on the machine — which is exactly when a
+half-remembered sequence of hand edits does damage. Give it a command, and keep its one privileged
+step (Phase 6, steps 5–6) separate so the common case stays unprivileged.
 
 Also add a **guard that refuses starting a second container stack from inside a worktree**. There is one
 stack; a worktree that starts its own gets port conflicts and a second database that nothing points at.

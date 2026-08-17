@@ -6,6 +6,7 @@
 #   status     what is in place and what is not                                    (no root)
 #   cert       issue or renew the zone's wildcard via DNS-01                       (no root)
 #   publish    claim this project's host pattern in the proxy + renewal timer      (ONE sudo)
+#   unpublish  give it back: matcher, registry row, and the zone if it was the last (no root)
 #
 # The worktree half — one isolated checkout, database and URL per session:
 #   create list info shell provision sync-db merge remove prune-merged wire
@@ -33,6 +34,12 @@ case "${1:-}" in
 		printf '  grove cert                issue or renew the zone wildcard      (no root)\n'
 		printf '  grove publish             put this project on the zone          (root only until\n'
 		printf '                            the one-time setup that status prints)\n'
+		printf '  grove unpublish           take this project off the zone        (no root)\n'
+		printf '                            [--promote <project>] names who takes over the zone\n'
+		printf '                            default when this project owns it\n'
+		printf '  grove unpublish-zone      once the zone is empty: remove its    (no root, except one\n'
+		printf '                            certificate store and renewal timer   sudo re-run if a\n'
+		printf '                            [--force] ignores a stale registry    LaunchDaemon is installed)\n'
 		printf '  sudo grove publish-timer  install the zone renewal timer         (root, once per zone)\n\n'
 		printf 'Worktrees\n'
 		printf '  grove create <name>       branch + worktree + site. No sudo, no prompts.\n'
@@ -49,7 +56,7 @@ case "${1:-}" in
 		printf '  grove hook create | remove | context | on-edit\n\n'
 		printf 'Reads .grove.conf from this directory or any parent.\n'
 		exit 0 ;;
-	-V|--version) printf 'grove 0.2.6\n'; exit 0 ;;
+	-V|--version) printf 'grove 0.2.7\n'; exit 0 ;;
 esac
 
 PKG_DIR="${GROVE_PKG_DIR:-$(cd "$(dirname "$(readlink "${BASH_SOURCE[0]}" || printf '%s' "${BASH_SOURCE[0]}")")/.." && pwd)}"
@@ -332,12 +339,7 @@ cmd_install_rootless() {
 		# answered by whichever project owns the zone default.
 		if grep -q -- "# $PROJECT — added by grove" "$SITE_FILE"; then
 			local stripped; stripped="$(mktemp)"
-			awk -v tag="# $PROJECT — added by grove" '
-				index($0, tag) { skipping = 1; next }
-				skipping && /^\t\}$/ { skipping = 0; next }
-				skipping { next }
-				{ print }
-			' "$SITE_FILE" > "$stripped"
+			strip_matcher "$SITE_FILE" "$PROJECT" > "$stripped"
 			cat "$stripped" > "$SITE_FILE"
 			rm -f "$stripped"
 		fi
@@ -716,6 +718,429 @@ apply_caddy() {
 	fi
 }
 
+# --- unpublish: the inverse of publish -----------------------------------------------------------
+#
+# NOT "publish with the sign flipped". The zone block is SHARED by every project on the zone, so what
+# has to happen depends on what this project is inside it: a host matcher, which is deleted, or the
+# DEFAULT UPSTREAM every unclaimed name falls through to — which cannot simply be deleted, because a
+# zone block with matchers and no default answers every other name with a 404 from Caddy itself.
+#
+# The order below is load-bearing and is the reason this command exists at all: doing it by hand on a
+# live zone means editing a shared config, remembering the registry, reloading, and then a launchd
+# teardown whose two steps only work one way round.
+
+# The file that actually defines this zone's site block. Searched by CONTENT, never by name: a
+# pre-0.2.5 install keeps the block under whichever PROJECT wrote it first, and a privileged install
+# keeps it in the machine's Caddyfile rather than in a site file at all.
+zone_block_file() {
+	local f
+	for f in "$SITE_FILE" "$SITES_DIR"/*.caddy "$CADDYFILE"; do
+		[ -f "$f" ] || continue
+		grep -qE "^${ZONE//./\\.}(,|[[:space:]])" "$f" && { printf '%s\n' "$f"; return 0; }
+	done
+	return 1
+}
+
+# Every project owning a matcher inside the zone block, one per line. The project that owns the
+# DEFAULT upstream is deliberately not among them — it has no tag, which is what makes it the default.
+zone_matchers() { # <zone-file>
+	awk '
+		/^\t# .* — added by grove$/ {
+			line = $0
+			sub(/^\t# /, "", line)
+			sub(/ — added by grove$/, "", line)
+			print line
+		}
+	' "$1" 2>/dev/null
+}
+
+# Delete a project's matcher block from a zone file (to stdout), along with the blank line that
+# separated it from whatever is above. Shared with publish, which strips its own block before
+# rewriting it — the two must agree on what a block is, or one of them leaves half of it behind.
+#
+# The "# " in the tag is what keeps `shop` from matching `web-shop`.
+strip_matcher() { # <file> <project>
+	awk -v tag="# $2 — added by grove" '
+		function flush(   i) { for (i = 0; i < held; i++) print ""; held = 0 }
+		skipping && /^\t\}$/ { skipping = 0; next }
+		skipping { next }
+		index($0, tag) { held = 0; skipping = 1; next }
+		/^[[:space:]]*$/ { held++; next }
+		{ flush(); print }
+		END { flush() }
+	' "$1"
+}
+
+# Delete the whole zone block — its site-address line through the closing brace at column 0 — plus
+# grove's own header comment above it (to stdout).
+strip_zone_block() { # <file>
+	awk -v zre="^${ZONE//./\\.}[ ,{]" '
+		function flush(   i) { for (i = 0; i < n; i++) print held[i]; n = 0 }
+		del && /^\}/ { del = 0; next }
+		del { next }
+		$0 ~ zre { n = 0; del = 1; next }
+		/^[[:space:]]*$/ || /^#/ { held[n++] = $0; next }
+		{ flush(); print }
+		END { flush() }
+	' "$1"
+}
+
+# A project's matcher block, rewritten as a plain default upstream: the host matcher line goes, and
+# the `@name` comes off its reverse_proxy.
+#
+# MOVED, never regenerated from a template. The registry knows a project's port and nothing else, so
+# a regenerated block would guess at the scheme, the headers and the transport — and guess wrong for
+# any project that is not on the defaults.
+matcher_as_default() { # <file> <project>
+	awk -v tag="# $2 — added by grove" -v proj="$2" '
+		index($0, tag) { inb = 1; print "\t# " proj " — the zone default, promoted by grove unpublish"; next }
+		inb {
+			if ($0 ~ "^\t@" proj " host ") next
+			line = $0
+			sub("reverse_proxy @" proj " ", "reverse_proxy ", line)
+			print line
+			if ($0 ~ /^\t\}$/) inb = 0
+		}
+	' "$1"
+}
+
+# Drop the zone's current default reverse_proxy and put the promoted one at the END of the block.
+#
+# THE END IS THE WHOLE POINT. A reverse_proxy with no matcher matches every request and is terminal,
+# so a promoted default sitting above another project's matcher would swallow that project's traffic
+# entirely — a 200 serving the wrong project's site, which is the exact failure 0.2.5 was about.
+#
+# The promoted block is passed as a FILE and read with getline: `awk -v` cannot carry an embedded
+# newline (it aborts with "newline in string"), which is how the sync-ignore splice broke in 0.2.4.
+swap_default() { # <file> <promoted-block-file>
+	awk -v zre="^${ZONE//./\\.}[ ,{]" -v nf="$2" '
+		function flush(   i) { for (i = 0; i < n; i++) print held[i]; n = 0 }
+		$0 ~ zre { inz = 1; flush(); print; next }
+		# A default written WITHOUT a block — `reverse_proxy 127.0.0.1:8080` on its own line — is one
+		# line, not a region. Skipping to the next `\t}` in that case would eat every remaining line of
+		# the zone block, closing brace included.
+		inz && /^\treverse_proxy [^@]/ { n = 0; if ($0 ~ /\{[[:space:]]*$/) del = 1; next }
+		del && /^\t\}$/ { del = 0; next }
+		del { next }
+		inz && /^\}/ {
+			n = 0
+			print ""
+			while ((getline l < nf) > 0) print l
+			print
+			inz = 0
+			next
+		}
+		/^[[:space:]]*$/ { held[n++] = $0; next }
+		{ flush(); print }
+		END { flush() }
+	' "$1"
+}
+
+# Put an edited zone file in place and check that the COMBINED config still parses, reverting if it
+# does not. Same shape as publish and for the same reason: the file is what the Caddyfile imports, so
+# it has to be on disk to be checked at all — and a config that does not parse must never reach the
+# live proxy. The only thing that changed is one file we have a copy of, so the revert is total.
+apply_zone_edit() { # <zone-file> <new-content-file>
+	local zf="$1" new="$2" backup removed=0
+	backup="$(mktemp)" || die "could not create a temp file"
+	cp "$zf" "$backup"
+
+	# The machine's Caddyfile is shared with every other project on it and is not ours to lose, so a
+	# dated copy stays behind — the same one publish leaves when it edits that file.
+	[ "$zf" = "$CADDYFILE" ] && cp "$CADDYFILE" "${CADDYFILE}.bak-$(date +%Y%m%d-%H%M%S)"
+
+	# A site file with nothing left in it but comments and blank lines is removed rather than kept as
+	# a stub — an import glob that matches no file is a warning, not an error. The machine's Caddyfile
+	# is never removed: it holds the global options and the imports.
+	#
+	# Permission is checked BEFORE the write, not after. A rootless machine whose zone block is still
+	# in the root-owned Caddyfile (an install that switched over later) would otherwise fail the write
+	# silently, and `adapt` would then happily parse the config that never changed — reporting success
+	# for a project that is still routed.
+	if [ "$zf" != "$CADDYFILE" ] && ! grep -qvE '^[[:space:]]*(#.*)?$' "$new"; then
+		[ -w "$(dirname "$zf")" ] || { rm -f "$backup"; die "$(dirname "$zf") is not writable by $(id -un) — run: sudo grove unpublish"; }
+		rm -f "$zf" && removed=1
+	else
+		[ -w "$zf" ] || { rm -f "$backup"; die "$zf is not writable by $(id -un) — run: sudo grove unpublish"; }
+		cat "$new" > "$zf"
+	fi
+
+	if ! caddy adapt --config "$CADDYFILE" --adapter caddyfile >/dev/null 2>&1; then
+		cp "$backup" "$zf"; rm -f "$backup"
+		die "the edited config does not parse — reverted, and nothing was applied"
+	fi
+	rm -f "$backup"
+
+	if [ "$removed" -eq 1 ]; then
+		ok "removed $zf — nothing was left in it"
+	else
+		ok "rewrote $zf and the combined config parses"
+	fi
+}
+
+cmd_unpublish() {
+	grove_require_public
+	require_tools "caddy:brew install caddy" "awk:check your PATH"
+
+	local promote=""
+	while [ $# -gt 0 ]; do
+		case "$1" in
+			--promote)   promote="${2:-}"; [ -n "$promote" ] || die "--promote needs a project name"; shift 2 ;;
+			--promote=*) promote="${1#*=}"; shift ;;
+			*) die "unknown option: $1 — usage: grove unpublish [--promote <project>]" ;;
+		esac
+	done
+
+	printf '\n  %sUnpublish %s from %s%s\n\n' "$C_BOLD" "$PROJECT" "$ZONE" "$C_OFF"
+
+	local zf; zf="$(zone_block_file)" || zf=""
+
+	# In privileged mode the block lives in the machine's Caddyfile and applying means restarting the
+	# daemon; both need root. Everything on the rootless path needs none.
+	if [ -n "$zf" ] && ! rootless_ready && [ "$(id -u)" -ne 0 ]; then
+		die "this machine still needs the privileged path — either run with sudo, or do the one-time setup that removes it (see: grove status)"
+	fi
+
+	# Who else is on the zone, from BOTH sources, because they drift apart in practice: a row with no
+	# matcher is what a teardown by hand leaves behind, a matcher with no row is what a registry
+	# written by root and later rewritten by you leaves behind. Neither is a reason to refuse.
+	local others_file="" others_reg="" others=""
+	[ -n "$zf" ] && others_file="$(zone_matchers "$zf" | grep -v "^${PROJECT}$")"
+	[ -f "$ZONE_REGISTRY" ] && others_reg="$(cut -f1 "$ZONE_REGISTRY" 2>/dev/null | grep -v "^${PROJECT}$")"
+	others="$(printf '%s\n%s\n' "$others_file" "$others_reg" | grep -v '^[[:space:]]*$' | sort -u)"
+
+	local mine="no"
+	if [ -n "$zf" ]; then
+		{ zone_matchers "$zf" | grep -q "^${PROJECT}$"; } && mine="matcher"
+		grep -q -- "$HOST_FIRST" "$zf" && mine="matcher"
+		[ "$(caddyfile_default_port)" = "$UPSTREAM_PORT" ] && mine="default"
+	fi
+
+	local new; new="$(mktemp)" || die "could not create a temp file"
+	# shellcheck disable=SC2064
+	trap "rm -f '$new' '$new.promoted'" RETURN
+
+	case "$mine" in
+	no)
+		if [ -n "$zf" ]; then
+			warn "the $ZONE block does not route $PROJECT — leaving the proxy alone"
+		else
+			warn "nothing on this machine serves $ZONE — leaving the proxy alone"
+		fi
+		;;
+
+	matcher)
+		strip_matcher "$zf" "$PROJECT" > "$new"
+		apply_zone_edit "$zf" "$new"
+		ok "removed the $PROJECT matcher from the $ZONE block"
+		;;
+
+	default)
+		if [ -z "$others" ]; then
+			# Last project AND the default: there is no matcher to strip, the block IS the routing.
+			strip_zone_block "$zf" > "$new"
+			apply_zone_edit "$zf" "$new"
+			ok "removed the whole $ZONE block — $PROJECT was the last project on it"
+		else
+			# Someone has to become the default, or every name under the zone that is not one of the
+			# remaining matchers starts 404ing out of Caddy.
+			local candidates picked
+			candidates="$(zone_matchers "$zf" | grep -v "^${PROJECT}$" | sort -u)"
+			[ -n "$candidates" ] || die "$PROJECT owns the default upstream for $ZONE, and no other project on it has a matcher to promote in its place.
+       Still on the zone: $(printf '%s' "$others" | tr '\n' ' ')
+       Publish one of them first, or unpublish it too and take the zone down with this one."
+
+			if [ -n "$promote" ]; then
+				printf '%s\n' "$candidates" | grep -q "^${promote}$" \
+					|| die "cannot promote $promote — it has no matcher in the $ZONE block. One of: $(printf '%s' "$candidates" | tr '\n' ' ')"
+				picked="$promote"
+			else
+				picked="$(printf '%s\n' "$candidates" | head -1)"
+			fi
+
+			matcher_as_default "$zf" "$picked" > "$new.promoted"
+			[ -s "$new.promoted" ] || die "could not read $picked's block out of $zf — nothing was changed"
+			swap_default "$zf" "$new.promoted" > "$new"
+			# Its matcher goes only after the promoted copy is safely in the staged content.
+			local stripped; stripped="$(mktemp)"
+			strip_matcher "$new" "$picked" > "$stripped"
+			# The block's own header names the project that first wrote it, which is the one leaving.
+			# Left alone it credits a project that is no longer on the zone at all. Only the name is
+			# replaced — the sentence carries on past it on the same line.
+			sed "s|^\(# ${ZONE} — added by grove for \)${PROJECT}|\1${picked}|" "$stripped" > "$new"
+			rm -f "$stripped"
+
+			apply_zone_edit "$zf" "$new"
+			ok "removed $PROJECT, and promoted $picked to the zone's default upstream"
+			warn "$picked now answers every name under $ZONE that no other project claims"
+			if [ "$(printf '%s\n' "$candidates" | wc -l | tr -d ' ')" -gt 1 ] && [ -z "$promote" ]; then
+				warn "there were others to choose from — re-run with --promote <project> to pick a different one"
+			fi
+		fi
+		;;
+	esac
+
+	# What this project's hostnames do NOW. They do not stop answering: they are unclaimed names under
+	# a zone that still has a default upstream, so they fall through to it and serve ANOTHER project's
+	# site — the same 200-with-the-wrong-site shape as a matcher that matches nothing. Said out loud
+	# here rather than left to be met in a browser.
+	if [ "$mine" != "no" ]; then
+		local now_default owner=""
+		now_default="$(caddyfile_default_port)"
+		if [ -n "$now_default" ]; then
+			[ -f "$ZONE_REGISTRY" ] && owner="$(awk -F'\t' -v p="$now_default" '$2 == p { print $1; exit }' "$ZONE_REGISTRY")"
+			if [ -n "$owner" ]; then
+				warn "wt1-${PROJECT}.${ZONE} … wt${GROVE_SLOTS:-5}-${PROJECT}.${ZONE} are unclaimed now, and answer with $owner's site"
+			else
+				warn "wt1-${PROJECT}.${ZONE} … wt${GROVE_SLOTS:-5}-${PROJECT}.${ZONE} are unclaimed now, and answer with whichever project owns the zone default"
+			fi
+		fi
+	fi
+
+	if [ -f "$ZONE_REGISTRY" ] && cut -f1 "$ZONE_REGISTRY" 2>/dev/null | grep -q "^${PROJECT}$"; then
+		if zone_unregister "$PROJECT"; then
+			ok "removed $PROJECT from $ZONE_REGISTRY"
+		else
+			warn "could not update $ZONE_REGISTRY"
+		fi
+	fi
+
+	if [ "$mine" != "no" ]; then
+		if rootless_ready; then
+			if caddy reload --config "$CADDYFILE" --adapter caddyfile >/dev/null 2>&1; then
+				ok "Caddy reloaded over the admin API — no root, no restart, no downtime"
+			else
+				warn "reload failed; the file is in place and will apply on the next reload"
+			fi
+		else
+			apply_caddy 1
+		fi
+	fi
+
+	local left; left="$(zone_projects)"
+	if [ -n "$left" ]; then
+		printf '\n  %-14s %s\n\n' "still on zone" "$left"
+		return 0
+	fi
+
+	printf '\n'
+	ok "$ZONE has no projects left"
+	printf '\n  What is left is zone-wide, and outlives any one project:\n'
+	printf '    %s\n' "the certificate, ACME account and renew.sh in $CERT_DIR"
+	[ -f "$DAEMON_PLIST" ] && printf '    %s\n' "the renewal timer ${DAEMON_LABEL}"
+	printf '\n  Remove them with:\n\n'
+	printf '      grove unpublish-zone\n\n'
+	if [ -f "$DAEMON_PLIST" ]; then
+		printf '  That needs no root for the certificate store. Only the LaunchDaemon does — re-run it\n'
+		printf '  once with sudo and it finishes the job.\n\n'
+	else
+		printf '  No root: nothing zone-wide here lives outside your own directories.\n\n'
+	fi
+	printf '  The wildcard DNS record for %s is yours and is left alone: a wildcard pointing\n' "$ZONE"
+	printf '  at a private LAN address serves nothing and costs nothing to keep.\n\n'
+}
+
+# The zone-level teardown: the certificate store, the ACME account, the renewal script and the timer.
+#
+# Only the TIMER needs root, and only because a LaunchDaemon lives in /Library/LaunchDaemons. The
+# certificate store does not, despite holding a root-owned renew.log — see the note on that below.
+# So this does as much as the privileges it has allow, and names what is left.
+cmd_unpublish_zone() {
+	grove_require_public
+	require_tools "launchctl:macOS only — no systemd support"
+
+	local force=0
+	while [ $# -gt 0 ]; do
+		case "$1" in
+			--force) force=1; shift ;;
+			# Named rather than ignored: a mistyped --force would otherwise proceed unforced and die on
+			# the interlock, which reads as the interlock being wrong.
+			*) die "unknown option: $1 — usage: grove unpublish-zone [--force]" ;;
+		esac
+	done
+
+	# INTERLOCK, and not a formality. The zone block's `tls` line points into the directory this
+	# removes. Deleting the certificate under a block that is still there does nothing visible now and
+	# then stops Caddy coming up at the next restart — taking every other project on the machine with
+	# it, hours or weeks later, for a reason nothing on screen will connect to this command.
+	if grove_caddy_cat | grep -q "$ZONE"; then
+		die "the proxy still serves $ZONE — run 'grove unpublish' in each project on it first
+       (the zone block's tls line points into $CERT_DIR, so removing it now would break Caddy at its next restart)"
+	fi
+
+	local left; left="$(zone_projects)"
+	if [ -n "$left" ] && [ "$force" -eq 0 ]; then
+		die "$ZONE_REGISTRY still lists: $left
+       run 'grove unpublish' in each of those projects first, or --force to remove the zone anyway"
+	fi
+
+	# THE TIMER IS THE ONLY PART THAT NEEDS ROOT, so it is the only part gated on it. Run as yourself
+	# this removes everything else and names the one step left; run under sudo it does all of it, in
+	# the order below. Either way it is idempotent, so the sudo run is a safe second pass.
+	local timer_left=0
+	if [ "$(id -u)" -eq 0 ]; then
+		# BOOTOUT FIRST, THEN THE PLIST — never the other way round. launchctl works from the LABEL, not
+		# from the file, so a plist removed first leaves the job loaded until the machine reboots: it goes
+		# on firing at 04:17 into a renew.sh that no longer exists, and `launchctl bootout` afterwards has
+		# nothing on disk to name.
+		if launchctl print "system/${DAEMON_LABEL}" >/dev/null 2>&1; then
+			launchctl bootout "system/${DAEMON_LABEL}" 2>/dev/null || true
+			local waited=0
+			while launchctl print "system/${DAEMON_LABEL}" >/dev/null 2>&1 && [ "$waited" -lt 30 ]; do
+				sleep 1; waited=$((waited + 1))
+			done
+			if launchctl print "system/${DAEMON_LABEL}" >/dev/null 2>&1; then
+				die "the renewal timer is still loaded after 30s — not removing its plist, or it would stay loaded until reboot"
+			fi
+			ok "unloaded the renewal timer ($DAEMON_LABEL)"
+		else
+			ok "no renewal timer was loaded for $ZONE"
+		fi
+		[ -f "$DAEMON_PLIST" ] && rm -f "$DAEMON_PLIST" && ok "removed $DAEMON_PLIST"
+	elif launchctl print "system/${DAEMON_LABEL}" >/dev/null 2>&1 || [ -f "$DAEMON_PLIST" ]; then
+		timer_left=1
+	else
+		ok "no renewal timer to remove for $ZONE"
+	fi
+
+	# THE CERTIFICATE STORE NEEDS NO ROOT, despite holding a root-owned renew.log. Removing a file is
+	# a write to the DIRECTORY that holds it, not to the file — and this directory is yours. (Checked
+	# on the real thing rather than assumed: renaming root's renew.log inside it succeeds as you, and
+	# rename and unlink are the same permission.)
+	#
+	# The only rm -rf in this tool. ZONE is checked literally rather than trusted to be non-empty:
+	# without a zone this path is the whole grove data directory, every other zone included.
+	[ -n "$ZONE" ] || die "the zone is empty — refusing to remove $REAL_HOME/.local/share/grove/"
+	if [ -d "$CERT_DIR" ]; then
+		rm -rf "$CERT_DIR" 2>/dev/null
+		# CHECKED, not assumed. An unwritable file is no obstacle, but a root-owned SUBDIRECTORY is —
+		# `sudo grove cert` on some machine leaves lego's tree owned by root, and rm then leaves the
+		# directory standing. Reporting success over that would be a lie with a certificate in it.
+		if [ -d "$CERT_DIR" ]; then
+			warn "could not remove all of $CERT_DIR — part of it is owned by root (a 'sudo grove cert' at some point)"
+			warn "finish it with: sudo rm -rf \"$CERT_DIR\""
+		elif [ "$(id -u)" -eq 0 ]; then
+			ok "removed $CERT_DIR (certificate, key, ACME account, renew.sh, renew.log)"
+		else
+			ok "removed $CERT_DIR (certificate, key, ACME account, renew.sh, renew.log) — no root needed"
+		fi
+	else
+		ok "no certificate store at $CERT_DIR"
+	fi
+
+	if [ "$timer_left" -eq 1 ]; then
+		printf '\n'
+		warn "the renewal timer is still installed, and a LaunchDaemon is the one thing here that root owns"
+		printf '\n  It now fires nightly into a renew.sh that is gone. Finish with:\n\n'
+		printf '      sudo grove unpublish-zone\n\n'
+		return 0
+	fi
+
+	printf '\n  %s is gone from this machine.\n' "$ZONE"
+	printf '  Its wildcard DNS record is untouched — that one is yours, and a wildcard pointing at a\n'
+	printf '  private LAN address is harmless to leave in place.\n\n'
+}
+
 need() { [ -n "${2:-}" ] || die "usage: grove $1 <worktree>  (grove list shows them)"; }
 
 case "${1:-status}" in
@@ -723,6 +1148,8 @@ case "${1:-status}" in
 	status)          cmd_status ;;
 	cert)            cmd_cert ;;
 	publish|install) cmd_install ;;
+	unpublish)       shift; cmd_unpublish "$@" ;;
+	unpublish-zone)  shift; cmd_unpublish_zone "$@" ;;
 
 	# The one genuinely root-requiring step, and the only one: a LaunchDaemon lives in
 	# /Library/LaunchDaemons, which no unprivileged process can write. Split out from `publish` so

@@ -1,5 +1,50 @@
 # Changelog
 
+## 0.2.7 — 2026-08-12
+
+**`grove unpublish` — the inverse of publish, which did not exist.** Tearing two test projects off
+`dev.configbox.at` had to be done entirely by hand: edit the shared zone block, remember the registry,
+reload, then a launchd teardown whose two steps only work one way round. That is precisely the
+sequence a tool should own.
+
+- **`grove unpublish`** removes this project's matcher from the zone's Caddy block and its row from
+  `projects.tsv`, then reloads over the admin API. **No root** — it stages and adapts before it
+  reloads, the same way publish does, so a config that does not parse never reaches the live proxy.
+- **A project can be the zone's DEFAULT upstream** — the trailing `reverse_proxy` with no matcher —
+  and removing that one would leave a block with matchers and no default, 404ing every unclaimed name
+  out of Caddy itself. grove now promotes another project into the position (`--promote <project>`
+  chooses), by **moving** its block rather than generating one: only the block knows that project's
+  real scheme, headers and transport. When there is nothing to promote it refuses and says why.
+- **The promoted default lands at the END of the zone block.** A matcher-less `reverse_proxy` matches
+  every request and is terminal, so above another project's matcher it would swallow that project's
+  traffic entirely — the same silent 200-with-the-wrong-site as 0.2.5's matcher bug, arriving from the
+  other direction. Verified end to end against a scratch zone with live upstreams, not by reading the
+  generated file.
+- **The last project takes the zone block with it**, and the site file is removed rather than left as
+  an empty stub (an import glob that matches nothing is a warning, not an error).
+- **`grove unpublish-zone`** removes the zone's certificate store, ACME account, renewal script and
+  timer. It refuses while the proxy still serves the zone — that directory is what the block's `tls`
+  line points at, so removing it early breaks Caddy at its next restart and takes every other project
+  on the machine with it — and while `projects.tsv` still lists projects, which `--force` overrides
+  for a registry that has gone stale on its own.
+- **And it needs no root for any of that**, including the root-owned `renew.log` the timer wrote:
+  unlinking a file is a write to the **directory** that holds it, not to the file, and that directory
+  is yours. (Verified against the real root-owned log on this machine rather than assumed — the belief
+  that it needed `sudo` is what the command was first built around.) The only genuinely privileged
+  step left in grove's whole lifecycle is the LaunchDaemon plist, because `/Library/LaunchDaemons` is
+  root's: run under `sudo` the command does everything, in the order `launchctl bootout` **before**
+  removing the plist (the reverse leaves the job loaded until reboot, firing nightly into a `renew.sh`
+  that no longer exists); run as yourself it does everything else and names that one step.
+- **The removal is checked rather than announced.** An unwritable file is no obstacle to `rm -rf`, but
+  a subdirectory owned by root — what a `sudo grove cert` leaves behind — survives it. The command now
+  confirms the directory is actually gone, because reporting success over a certificate still on disk
+  is worse than reporting the failure.
+- **The registry and the proxy config drift apart in practice** (a hand teardown leaves a row with no
+  matcher; a registry written by root leaves a matcher with no row). Each is now handled on its own
+  rather than one being a precondition for the other.
+- **Neither command touches DNS.** The zone's wildcard record is the user's, and one pointing at a
+  private LAN address serves nothing.
+
 ## 0.2.6 — 2026-08-11
 
 Both found by checking the public hostnames end to end after 0.2.5's matcher fix.

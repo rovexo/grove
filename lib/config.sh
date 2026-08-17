@@ -178,7 +178,11 @@ CRT="$CERT_DIR/certs/_.${ZONE}.crt"
 KEY="$CERT_DIR/certs/_.${ZONE}.key"
 
 DAEMON_LABEL="com.rovexo.grove.renew.${ZONE}"
-DAEMON_PLIST="/Library/LaunchDaemons/${DAEMON_LABEL}.plist"
+# Overridable for the same reason GROVE_CADDY_PLIST is: this path is the ONE thing in the whole
+# teardown that root owns, so without a way to point it somewhere else the branch that says "this is
+# the step I could not do for you" can only be exercised by someone with the password — which is to
+# say, never, on the machine where it matters.
+DAEMON_PLIST="${GROVE_DAEMON_PLIST:-/Library/LaunchDaemons/${DAEMON_LABEL}.plist}"
 RENEW_SCRIPT="$CERT_DIR/renew.sh"
 
 
@@ -236,6 +240,25 @@ zone_register() { # <project> <port> <host-pattern>
 	printf '%s\t%s\t%s\n' "$1" "$2" "$3" >> "$tmp"
 	sort -o "$tmp" "$tmp" && mv "$tmp" "$ZONE_REGISTRY"
 	chmod 644 "$ZONE_REGISTRY" 2>/dev/null
+}
+
+# The inverse, for unpublish. Two details, both of which have a way of being got wrong:
+#
+# `grep -v` EXITS 1 when it filters out every line — which is precisely the case this exists for, the
+# last project leaving the zone. Chaining the move onto its exit status would leave the row in place
+# in exactly the situation that matters, and say nothing.
+#
+# And the file is REPLACED rather than written through. On one zone here projects.tsv is owned by
+# root (a sudo publish, or the renewal timer, wrote it last) inside a directory owned by you — so a
+# rename succeeds where a truncate-and-write fails with "Permission denied". Same trap as the renewal
+# script in bin/grove.
+zone_unregister() { # <project>
+	[ -f "$ZONE_REGISTRY" ] || return 0
+	local tmp; tmp="$(mktemp)" || return 1
+	grep -v "^$1	" "$ZONE_REGISTRY" > "$tmp" 2>/dev/null || true
+	mv "$tmp" "$ZONE_REGISTRY" || { rm -f "$tmp"; return 1; }
+	chmod 644 "$ZONE_REGISTRY" 2>/dev/null
+	return 0
 }
 
 zone_projects() { [ -f "$ZONE_REGISTRY" ] && cut -f1 "$ZONE_REGISTRY" | tr '\n' ' '; }

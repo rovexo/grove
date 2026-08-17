@@ -44,6 +44,24 @@ git clone https://github.com/rovexo/grove ~/grove
 | `grove status` | what is in place and what is not. No root. |
 | `grove cert` | issue or renew the zone's wildcard over DNS-01. No root. |
 | `sudo grove publish` | claim this project's hosts in the proxy + install the renewal timer. **One sudo, once.** |
+| `grove unpublish` | give them back: the proxy matcher, the registry row, and the zone block itself if this was the last project. No root. |
+| `grove unpublish-zone` | once the zone is empty: remove its certificate store and renewal timer. No root — except one `sudo` re-run if a LaunchDaemon was installed. `--force` if the registry has gone stale. |
+
+`unpublish` handles the case that makes this worth a command rather than an edit: a project can be the
+zone's **default upstream** — the trailing `reverse_proxy` with no matcher, which every unclaimed name
+falls through to. Removing that one while others remain would leave a block with matchers and no
+default, so grove promotes another project into the position instead (`--promote <project>` picks
+which), and it moves the promoted block to the **end** of the zone block, because a matcher-less
+`reverse_proxy` matches everything and would otherwise swallow the projects listed after it.
+
+DNS is left alone by both: the zone's wildcard record is yours, and a wildcard pointing at a private
+LAN address serves nothing.
+
+**Removing a project needs no root at all**, and neither does removing its certificate store — the
+store lives in your own directory, and unlinking a file is a write to the *directory* that holds it,
+so even the root-owned `renew.log` the timer wrote is yours to delete. The single exception in the
+whole lifecycle is the LaunchDaemon: `/Library/LaunchDaemons` is root's, so `grove unpublish-zone`
+does everything else, then names that one step.
 
 **Worktrees** — one isolated checkout, database and URL per session:
 
