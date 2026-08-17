@@ -101,6 +101,19 @@ certificate.
 already has one, point `GROVE_CADDYFILE`/`GROVE_CADDY_LABEL` at it: `install` then claims a host matcher
 inside its existing block for the zone instead of adding a competing block.
 
+## Tests
+
+```bash
+tests/unpublish.sh
+```
+
+No root, no DNS, no certificate authority, and it leaves the machine's own proxy alone — it stands up
+a second Caddy on `:8443` with its own scratch zone and real TLS upstreams, then drives the actual
+binary against it. Every routing claim is proven by asking **which upstream answered**, because the
+failure this area keeps producing is a config that reads correctly and serves the wrong project.
+
+Releasing is two repositories, and the second one is easy to forget: [`docs/RELEASING.md`](docs/RELEASING.md).
+
 ## Requirements
 
 macOS (launchd + `ipconfig`); the tool refuses to run elsewhere rather than failing obscurely. A
