@@ -141,6 +141,28 @@ a working session pays once. Two details make it safe: an atomic `mkdir` lock, s
 cannot both start a seed against the same database; and leaving the marker in place when the stack is
 down, so the next edit retries instead of the worktree silently never getting a site.
 
+**Then make the deferred build observable, because deferring it split one fact into four.** Once the
+site is built later, "this worktree has a URL" stops meaning "that URL serves anything", and a reader
+needs to tell apart *not built yet*, *building right now*, *finished*, and *tried and failed*. Two
+files carry all four — the pending marker, whose contents describe the last failed attempt, and the
+lock directory, holding the builder's pid, its start time and the step it is on. Everything that
+reports (`list`, `info`, the worktree's own note, the hook's message back to the session) derives its
+answer from those, so they cannot disagree.
+
+Three things this gets wrong if you do not think about them:
+
+- **Clear the marker only on success.** Clearing it either way makes a failed build read as a
+  finished one everywhere, *and* silently disables the retry — the next edit finds no marker and does
+  nothing. A build that never came up then looks exactly like one that did.
+- **A held lock is not a running build.** The on-edit hook has a timeout and that timeout is a hard
+  kill, so a lock outliving its owner is ordinary, not exotic. Check the recorded pid: alive means
+  wait, gone means the build was cut off. A lock whose owner has died must be breakable or one
+  timeout costs the worktree its site permanently — but log it loudly, because the container-side
+  child it spawned (composer, `di:compile`) outlives the parent and may still be running.
+- **A retry that survives failure retries on *every* edit.** Count the failed attempts in the marker
+  and stop after a couple, naming the manual command instead. Otherwise a build that fails
+  reproducibly costs minutes per keystroke — the cure being worse than the disease it replaced.
+
 Also add a **catch-all vhost** that refuses unknown hostnames. Do not implement it as `default_server`
 if your dev tool generates its own vhost — that tool will regenerate the file, reclaim the token, and
 the web server will die on a duplicate default server. Match by **regex `server_name`** instead: the

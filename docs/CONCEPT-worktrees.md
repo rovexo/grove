@@ -148,7 +148,7 @@ That is the interface that matters. The CLI below is the human one.
 
 ```
 grove create <name>          branch + worktree + site.   No sudo. No prompts.
-grove list                   worktrees: branch, URL, database, idle time
+grove list                   worktrees: branch, URL, database, build state, idle time
 grove info <name>            paths, URL, schema, table count, commits ahead
 grove shell <name> [cmd]     run in that worktree, inside the container
 grove provision <name>       give a site-less worktree its site after the fact

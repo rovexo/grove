@@ -767,26 +767,240 @@ grove_has_site() { # <name>
 	case "$1" in wt[0-9]*) return 0 ;; *) return 1 ;; esac
 }
 
+# --- what state is the site in? ---------------------------------------------------------------------
+#
+# A worktree's site is not built the moment the worktree exists — provisioning is deferred by default
+# and takes minutes on a real platform. So "there is a URL" and "that URL serves anything" are two
+# different facts, and everything that reports on a worktree has to be able to tell them apart.
+#
+# Two files carry the whole state, and BOTH already exist for other reasons — which is why no third
+# one is introduced here. A new marker name would have to be added to grove_write_excludes AND to the
+# case arm in grove_worktree_dirty, and one forgotten there reads as the session's own untracked work:
+# the WorktreeRemove hook then refuses to release the slot, forever.
+#
+#   .grove-provision-pending   this worktree still wants a build. Its CONTENTS, when it has any,
+#                              describe the attempt that failed.
+#   .grove-provision-lock/     a build is running. A directory because mkdir is the portable atomic
+#                              test-and-set; the status file inside it is written by the holder alone
+#                              and so needs no atomicity of its own.
+
+grove_pending_file() { printf '%s/.grove-provision-pending' "$(grove_wt_dir "$1")"; }
+grove_lock_dir()     { printf '%s/.grove-provision-lock' "$(grove_wt_dir "$1")"; }
+grove_lock_field()   { sed -n "s/^$2=//p" "$(grove_lock_dir "$1")/status" 2>/dev/null | tail -1; }
+grove_marker_field() { sed -n "s/^$2=//p" "$(grove_pending_file "$1")" 2>/dev/null | tail -1; }
+
+# One word, and the ONLY place those two files are interpreted — list, info, the note and the on-edit
+# hook all ask this rather than testing for markers themselves, so they cannot disagree about what a
+# worktree is doing.
+#
+#   none         this worktree cannot have a site at all
+#   ready        built, and the build finished cleanly
+#   pending      wants a build; nothing is running. The next Edit/Write starts one.
+#   building     a build holds the lock and its process is alive
+#   interrupted  the lock is held by a process that is gone — the build was killed part-way
+#   failed       a build reached a real step and failed there
+#
+# `interrupted` is not an exotic case on this platform: `grove wire` gives the on-edit hook a timeout,
+# that timeout is a hard kill, and a Magento post-create step outruns it comfortably. Naming it is the
+# difference between "nothing happened and I don't know why" and one sentence of remedy.
+grove_build_state() { # <name>
+	local pid
+	grove_has_site "$1" || { printf 'none'; return 0; }
+
+	if [ -d "$(grove_lock_dir "$1")" ]; then
+		pid="$(grove_lock_field "$1" PID)"
+		if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then printf 'building'; else printf 'interrupted'; fi
+		return 0
+	fi
+	[ -f "$(grove_pending_file "$1")" ] || { printf 'ready'; return 0; }
+	# `interrupted` OUTLIVES the lock it was diagnosed from. The next build breaks that stale lock, so
+	# a state derived from the lock alone would forget the cut-off the moment anything retried — and
+	# with it the count that stops a build which times out every single time from being retried on
+	# every single edit, forever.
+	case "$(grove_marker_field "$1" FAILED_KIND)" in
+	cutoff) printf 'interrupted' ;;
+	'')     printf 'pending' ;;
+	*)      printf 'failed' ;;
+	esac
+}
+
+# A short elapsed time, in the one unit that carries information at that scale. Rounded rather than
+# truncated throughout, for the same reason grove_list rounds days: this number exists to be judged by
+# eye, and 110 seconds reported as "1m" reads as half the wait it is.
+grove_since() { # <epoch> -> 45s | 3m | 2h | 4d
+	local then="${1:-}" d
+	[ -n "$then" ] || return 0
+	case "$then" in *[!0-9]*|'') return 0 ;; esac
+	d=$(( $(date +%s) - then ))
+	[ "$d" -lt 0 ] && d=0
+	if   [ "$d" -lt 90 ];     then printf '%ss' "$d"
+	elif [ "$d" -lt 5400 ];   then printf '%sm' "$(( (d + 30) / 60 ))"
+	elif [ "$d" -lt 172800 ]; then printf '%sh' "$(( (d + 1800) / 3600 ))"
+	else                           printf '%sd' "$(( (d + 43200) / 86400 ))"
+	fi
+}
+
+# The human detail behind a state: how long, and doing what. Empty when the state says it all.
+grove_build_detail() { # <name> <state>
+	local name="$1" step
+	case "$2" in
+	building)
+		step="$(grove_lock_field "$name" STEP)"
+		printf '%s%s' "$(grove_since "$(grove_lock_field "$name" STARTED)")" "${step:+ — $step}"
+		;;
+	interrupted)
+		# Two sources, because this state is diagnosed twice: once off a lock whose owner has died —
+		# where the only timestamp is when the build STARTED — and again from the record left behind
+		# when a later build broke that lock.
+		if [ -d "$(grove_lock_dir "$name")" ]; then
+			step="$(grove_lock_field "$name" STEP)"
+			printf 'started %s ago%s' "$(grove_since "$(grove_lock_field "$name" STARTED)")" "${step:+ at: $step}"
+		else
+			step="$(grove_marker_field "$name" FAILED_STEP)"
+			printf '%s ago%s' "$(grove_since "$(grove_marker_field "$name" FAILED_AT)")" "${step:+ at: $step}"
+		fi
+		;;
+	failed)
+		step="$(grove_marker_field "$name" FAILED_STEP)"
+		printf '%s ago%s' "$(grove_since "$(grove_marker_field "$name" FAILED_AT)")" "${step:+ at: $step}"
+		;;
+	esac
+}
+
+# How many times a build of this worktree has failed in a row. The on-edit hook stops retrying after
+# a couple, because with the marker now surviving a failure the retry is EVERY subsequent edit — and
+# a Magento build that fails reproducibly would otherwise cost minutes per keystroke.
+#
+# Always a number, never an empty string: the caller compares it with `-ge`, and bash answers an
+# empty left-hand side with "unary operator expected" — an error message, on a hook's stderr, in the
+# ordinary case where the marker carries no count at all.
+grove_build_failures() { # <name>
+	local n; n="$(grove_marker_field "$1" FAILED_COUNT)"
+	case "$n" in ''|*[!0-9]*) printf '0' ;; *) printf '%s' "$n" ;; esac
+}
+
+# Write the "this attempt did not finish" record into the pending marker — which therefore stays,
+# which is what makes the next file change a retry rather than a no-op.
+#
+# Read the count BEFORE opening the redirection, never inside it: `>` truncates its target as the
+# group starts, so counting in there would read the file this very write has just emptied and every
+# failure would look like the first.
+grove_build_record_failure() { # <name> <kind: failed|cutoff> <step>
+	local n; n=$(( $(grove_build_failures "$1") + 1 ))
+	{
+		printf 'FAILED_AT=%s\n' "$(date +%s)"
+		printf 'FAILED_KIND=%s\n' "$2"
+		printf 'FAILED_STEP=%s\n' "$3"
+		printf 'FAILED_COUNT=%s\n' "$n"
+	} >"$(grove_pending_file "$1")" 2>/dev/null || true
+}
+
+# Claim the build for this process. Returns 1 when someone else genuinely has it.
+grove_build_lock() { # <name>
+	local lock step; lock="$(grove_lock_dir "$1")"
+	if ! mkdir "$lock" 2>/dev/null; then
+		[ "$(grove_build_state "$1")" = "building" ] && return 1
+
+		# The remains of a build that was killed. Breaking it is right — otherwise one timed-out hook
+		# costs the worktree its site permanently, since every later attempt would find the lock held.
+		#
+		# But say so loudly: `grove_stack_exec` spawns the container-side work as a CHILD, and that
+		# child outlives the grove that was killed. A composer or di:compile started by the dead build
+		# can still be running, and this one cannot see it.
+		step="$(grove_lock_field "$1" STEP)"
+		grove_log "WARN: breaking a stale build lock in $1 — the process that held it is gone (was: ${step:-?})."
+		grove_log "      Anything it started INSIDE the container may still be running; this build cannot see it."
+		# Recorded, because breaking the lock is the ONLY moment anyone observes that a build was cut
+		# off — the build itself was killed and wrote nothing. Without this the count never rises, and
+		# a build that times out every time is retried on every edit for the life of the worktree.
+		grove_build_record_failure "$1" cutoff "${step:-unknown step}"
+		rm -rf "$lock" 2>/dev/null
+		mkdir "$lock" 2>/dev/null || return 1
+	fi
+	grove_build_step "$1" "starting"
+}
+
+# Record what the build is doing now. This is the whole point of the exercise: "building 4m" says
+# only that something is happening, while "building 4m — post-create: bin/magento setup:di:compile"
+# tells the reader whether to wait or to go and look.
+grove_build_step() { # <name> <step>
+	local lock started
+	lock="$(grove_lock_dir "$1")"
+	[ -d "$lock" ] || return 0
+	# STARTED survives every step. It is what the elapsed time is measured from, and re-stamping it
+	# per step would reset the clock and make a long build look like it had only just begun.
+	started="$(grove_lock_field "$1" STARTED)"
+	[ -n "$started" ] || started="$(date +%s)"
+	{
+		printf 'PID=%s\n' "$$"
+		printf 'STARTED=%s\n' "$started"
+		printf 'STEP=%s\n' "$2"
+	} >"$lock/status" 2>/dev/null || true
+}
+
+grove_build_unlock() { rm -rf "$(grove_lock_dir "$1")" 2>/dev/null; }
+
 # --- provision ---------------------------------------------------------------------------------
 # Everything create deliberately deferred, and everything a worktree made while the stack was down
 # never got. Idempotent by construction, so the on-edit hook, the CLI and a retry all do the same.
+#
+# The guards, the lock and the reporting live here; the work itself is grove_build. Split for one
+# concrete reason: the lock has to be released on EVERY exit path, and an EXIT trap cannot do that
+# job in a function — `grove_create` calls this and keeps working afterwards, so a trap would hold
+# the lock past the build and clobber whatever the caller had set.
 grove_provision() { # <name>
-	local name="$1" wt rc=0
+	local name="$1" wt rc
 	wt="$(grove_wt_dir "$name")"
 
 	grove_is_worktree "$wt" || { printf 'error: %s is not a worktree\n' "$name" >&2; return 1; }
 	grove_has_site "$name" || { grove_log "$name has no site to build (naming=$NAMING, stack=$STACK)"; rm -f "$wt/.grove-provision-pending"; return 0; }
 	grove_stack_running || { printf 'error: the %s stack is not running\n' "$STACK" >&2; return 1; }
 
+	# ONE BUILD AT A TIME, whoever asks. The lock used to be taken by the on-edit hook alone, which
+	# left `grove provision` free to start a second seed against the same database while the hook's
+	# was still running. It belongs here, where every entry point passes through.
+	#
+	# On STDERR, like every other message this function emits, and not for tidiness: with
+	# PROVISION=eager this runs inside grove_create, which runs inside the WorktreeCreate hook — whose
+	# STDOUT IS THE WORKTREE PATH and may carry nothing else. A line printed there would be prepended
+	# to the path Claude Code then tries to use.
+	if ! grove_build_lock "$name"; then
+		printf 'grove: %s is already building (%s) — leaving it alone.\n' \
+			"$name" "$(grove_build_detail "$name" building)" >&2
+		return 0
+	fi
+
+	# The note says "being built right now" for as long as that is true. Its reader is not the session
+	# that triggered this — that one is blocked in the Edit tool until the hook returns — but a second
+	# session finding the worktree, and the same session re-reading after a hook timeout cut the build
+	# off mid-flight.
+	grove_write_note "$name"
+
+	grove_build "$name"
+	rc=$?
+	grove_build_unlock "$name"
+	# Written after the unlock, so the note states the outcome rather than describing a build that has
+	# already finished. A session reading it mid-flight must not see the "no site" text either.
+	grove_write_note "$name"
+	return "$rc"
+}
+
+# The build itself. Runs with the lock held, and reports its progress into it step by step.
+grove_build() { # <name>
+	local name="$1" wt rc=0 failed="" cpaths
+	wt="$(grove_wt_dir "$name")"
+
 	if [ "$DB_SEED" != "none" ]; then
+		grove_build_step "$name" "seeding the database from $(grove_main_db)"
 		if grove_db_seed "$name"; then
 			grove_log "database $(grove_wt_db "$name") seeded from $(grove_main_db)"
 		else
 			grove_log "WARN: database seeding failed for $(grove_wt_db "$name")"
-			rc=1
+			failed="seeding the database"; rc=1
 		fi
 	fi
 
+	grove_build_step "$name" "writing the site config"
 	grove_write_site_config "$name" || grove_log "WARN: could not write the worktree's site config"
 
 	# Anything the platform keeps in its DATABASE rather than its config file. Magento's base URLs are
@@ -795,34 +1009,50 @@ grove_provision() { # <name>
 	# request straight back to a hostname that only resolves on this machine. Textual rewriting cannot
 	# fix that; it needs a statement about what the worktree's canonical URL now is.
 	if command -v grove_profile_post_seed >/dev/null 2>&1; then
+		grove_build_step "$name" "the $PLATFORM profile's post-seed step"
 		grove_profile_post_seed "$MAIN_ROOT" "$(grove_wt_dir "$name")" "$name" \
 			"$(grove_wt_db "$name")" "$(grove_wt_url "$name")" "https://$(grove_wt_local_host "$name")" \
 			|| grove_log "WARN: the profile's post-seed step failed"
 	fi
+
 	# A failed `container` copy IS a failed provision, not a warning: for the platform this strategy
-	# exists for, a missing vendor/ means the site cannot boot at all. Failing here keeps the marker
-	# in place so the next file change retries.
-	grove_container_copies "$name" || rc=1
+	# exists for, a missing vendor/ means the site cannot boot at all.
+	cpaths="$(grove_container_paths | tr '\n' ' ')"
+	[ -n "$cpaths" ] && grove_build_step "$name" "copying ${cpaths% } inside the container"
+	grove_container_copies "$name" || { [ -n "$failed" ] || failed="the container-side copies"; rc=1; }
 	grove_container_runtime_dirs "$name"
 
 	# Post-create commands run LAST and inside the container, because that is where the toolchain
 	# lives. They are the slow part (a Magento di:compile is minutes), which is precisely why the
-	# default is to arrive here on the first file change rather than during create.
+	# default is to arrive here on the first file change rather than during create — and why the step
+	# is named: this is where a build that looks stuck actually is.
 	local i cmd cdir
 	cdir="$(grove_wt_container_dir "$name")"
 	i=0
 	while [ "$i" -lt "${#GROVE_POST_CREATE[@]}" ]; do
 		cmd="${GROVE_POST_CREATE[$i]}"
 		grove_log "post-create: $cmd"
+		grove_build_step "$name" "post-create: $cmd"
 		grove_stack_exec "cd '$cdir' && $cmd" >>"$GROVE_LOG_FILE" 2>&1 \
-			|| { grove_log "WARN: post-create command failed: $cmd"; rc=1; }
+			|| { grove_log "WARN: post-create command failed: $cmd"; [ -n "$failed" ] || failed="post-create: $cmd"; rc=1; }
 		i=$((i + 1))
 	done
 
-	rm -f "$wt/.grove-provision-pending"
-	# The note is rewritten now that the site actually exists, so a session reading it mid-flight
-	# does not see the "no site" text it was created with.
-	grove_write_note "$name"
+	if [ "$rc" -eq 0 ]; then
+		rm -f "$wt/.grove-provision-pending"
+		grove_meta_write "$wt" "BUILT=$(date '+%Y-%m-%d %H:%M:%S')"
+		grove_log "$name: built — $(grove_wt_url "$name")"
+		return 0
+	fi
+
+	# THE MARKER SURVIVES A FAILED BUILD, and its contents say what went wrong.
+	#
+	# Clearing it regardless of the outcome — which is what this did — made a failed build
+	# indistinguishable from a finished one: `list`, `info` and the worktree's own note all read
+	# "ready" for a site that had never come up, and the next Edit/Write, which IS the retry, found no
+	# marker and did nothing. The hook's own comment said the marker was kept; the code removed it.
+	grove_build_record_failure "$name" failed "$failed"
+	grove_log "$name: build FAILED at: $failed"
 	return "$rc"
 }
 
@@ -839,7 +1069,7 @@ grove_provision() { # <name>
 #                        uncommitted never fires there. Without this copy the context hook silently
 #                        does nothing in exactly the case it exists for.
 grove_write_note() { # <name>
-	local name="$1" wt url db branch sub_branch
+	local name="$1" wt url db branch sub_branch state detail
 	wt="$(grove_wt_dir "$name")"
 	[ -d "$wt" ] || return 0
 	branch="$(grove_meta_get "$wt" BRANCH)"
@@ -847,9 +1077,9 @@ grove_write_note() { # <name>
 	[ -n "$branch" ] || branch="$(git -C "$wt" symbolic-ref --quiet --short HEAD 2>/dev/null)"
 
 	url=""; db=""
-	if grove_has_site "$name" && [ ! -f "$wt/.grove-provision-pending" ]; then
-		url="$(grove_wt_url "$name")"; db="$(grove_wt_db "$name")"
-	elif grove_has_site "$name"; then
+	state="$(grove_build_state "$name")"
+	detail="$(grove_build_detail "$name" "$state")"
+	if grove_has_site "$name"; then
 		url="$(grove_wt_url "$name")"; db="$(grove_wt_db "$name")"
 	fi
 
@@ -868,11 +1098,47 @@ grove_write_note() { # <name>
 			echo "| Database | \`$db\` (the main site's \`$(grove_main_db)\` is off-limits) |"
 			echo "| Branch | \`$branch\` |"
 			[ -n "$sub_branch" ] && echo "| Submodule branch | \`$sub_branch\` (in $SUBMODULE) |"
+			case "$state" in
+			ready) echo "| Site state | **ready** — built $(grove_meta_get "$wt" BUILT) |" ;;
+			building) echo "| Site state | **being built right now** ($detail) |" ;;
+			pending) echo "| Site state | not built yet |" ;;
+			interrupted) echo "| Site state | **the last build was cut off** ($detail) |" ;;
+			failed) echo "| Site state | **the last build failed** ($detail) |" ;;
+			esac
 			echo
-			if [ -f "$wt/.grove-provision-pending" ]; then
+			case "$state" in
+			building)
+				echo "**The site is being built as you read this** ($detail)."
+				echo
+				echo "Nothing to do but wait. It is one build at a time, so starting another does nothing;"
+				echo "\`grove list\` in the main checkout shows how far along it is."
+				echo
+				;;
+			pending)
 				echo "**The site is not built yet.** It builds itself on your first file change (that is the"
 				echo "\`.grove-provision-pending\` marker) — or run \`grove provision $name\` to do it now."
 				echo
+				;;
+			interrupted|failed)
+				echo "**The last build did not finish** ($detail)."
+				echo
+				echo "The site may be partly up or not up at all; treat what it serves as unreliable until a"
+				echo "build completes."
+				echo
+				echo "Your next file change retries it automatically, up to a couple of attempts. If it keeps"
+				echo "failing, run it from a terminal instead — the on-edit hook has a timeout, and a long"
+				echo "build (composer, di:compile) can simply outrun it, which is what \"cut off\" means above:"
+				echo
+				echo '```bash'
+				echo "grove provision $name"
+				echo '```'
+				echo
+				echo "The build's own output is in \`${GROVE_LOG_FILE#"$MAIN_ROOT"/}\`."
+				echo
+				;;
+			esac
+			case "$state" in
+			pending|building|interrupted|failed)
 				echo "**A file can be in HEAD before it is on disk here.** The checkout is still filling in"
 				echo "behind you, and on a synced stack the container's view lags the host's. If an edit fails"
 				echo "with \"file does not exist\" for something \`git show HEAD:<path>\` clearly has, that is"
@@ -882,7 +1148,8 @@ grove_write_note() { # <name>
 				echo "git checkout HEAD -- <path>"
 				echo '```'
 				echo
-			fi
+				;;
+			esac
 		else
 			echo "You are in an isolated git worktree (\`$name\`, branch \`$branch\`) with NO site of its own."
 			echo "File edits, commits and merges all work normally; there is just nothing to browser-test here."
@@ -1204,17 +1471,34 @@ grove_list() {
 }
 
 grove_list_row() { # <name> <dir> <stack-up>
-	local name="$1" dir="$2" stack_up="$3" branch state url idle
+	local name="$1" dir="$2" stack_up="$3" branch state url idle bstate detail
 	branch="$(git -C "$dir" symbolic-ref --quiet --short HEAD 2>/dev/null || echo '(detached)')"
 	state="in use"
 	[ -n "$(grove_worktree_dirty "$dir")" ] && state="in use, uncommitted changes"
 	url="-"
 	if grove_has_site "$name"; then
 		url="$(grove_wt_url "$name")"
-		[ -f "$dir/.grove-provision-pending" ] && state="$state, site not built yet"
-		if [ "$stack_up" = "yes" ] && [ ! -f "$dir/.grove-provision-pending" ] && ! grove_db_exists "$(grove_wt_db "$name")"; then
-			state="$state, NO DATABASE"
-		fi
+		# THE ROW SAYS WHICH OF THE THREE IT IS, always — including "ready". A row that simply omits
+		# any complaint is not the same signal: it reads identically to one whose site state nobody
+		# checked, which is exactly the ambiguity this column exists to remove.
+		#
+		# Uppercase is reserved for what needs attention, matching NO DATABASE below. A build in
+		# flight is information, not a problem, so it does not shout.
+		bstate="$(grove_build_state "$name")"
+		detail="$(grove_build_detail "$name" "$bstate")"
+		case "$bstate" in
+		building)    state="$state, building ${detail}" ;;
+		pending)     state="$state, site not built yet" ;;
+		interrupted) state="$state, BUILD CUT OFF ${detail}" ;;
+		failed)      state="$state, BUILD FAILED ${detail}" ;;
+		ready)
+			state="$state, site ready"
+			# Only meaningful once a build has finished: during one the seed is legitimately mid-flight.
+			if [ "$stack_up" = "yes" ] && ! grove_db_exists "$(grove_wt_db "$name")"; then
+				state="$state, NO DATABASE"
+			fi
+			;;
+		esac
 	fi
 	idle="$(grove_idle_hours "$dir")"
 	if [ -n "$idle" ]; then
@@ -1232,7 +1516,7 @@ grove_list_row() { # <name> <dir> <stack-up>
 }
 
 grove_info() { # <name>
-	local name="$1" wt branch ahead
+	local name="$1" wt branch ahead bstate detail built
 	wt="$(grove_wt_dir "$name")"
 	grove_is_worktree "$wt" || { printf 'error: %s is not a worktree\n' "$name" >&2; return 1; }
 	branch="$(git -C "$wt" symbolic-ref --quiet --short HEAD 2>/dev/null || echo '(detached)')"
@@ -1253,7 +1537,31 @@ grove_info() { # <name>
 			grove_db_exists "$(grove_wt_db "$name")" && printf ' (present)' || printf ' (MISSING)'
 		fi
 		printf '\n'
-		[ -f "$wt/.grove-provision-pending" ] && printf '  %-16s %s\n' "" "site not built yet — builds on the first file change"
+
+		# The same states `list` reports, with the one line of remedy that does not fit in a column.
+		bstate="$(grove_build_state "$name")"
+		detail="$(grove_build_detail "$name" "$bstate")"
+		built="$(grove_meta_get "$wt" BUILT)"
+		case "$bstate" in
+		ready)
+			printf '  %-16s ready%s\n' "build" "${built:+ (built $built)}"
+			;;
+		building)
+			printf '  %-16s building %s\n' "build" "$detail"
+			printf '  %-16s %s\n' "" "one build at a time; another grove provision would be refused"
+			;;
+		pending)
+			printf '  %-16s not built yet — builds on the first file change\n' "build"
+			printf '  %-16s %s\n' "" "or now, with: grove provision $name"
+			;;
+		interrupted|failed)
+			printf '  %-16s %s — %s\n' "build" \
+				"$([ "$bstate" = "failed" ] && printf 'FAILED' || printf 'CUT OFF part-way')" "$detail"
+			printf '  %-16s %s\n' "" "retry: grove provision $name   (a terminal has no hook timeout)"
+			printf '  %-16s failed attempts so far: %s\n' "" "$(grove_build_failures "$name")"
+			printf '  %-16s output: %s\n' "" "$GROVE_LOG_FILE"
+			;;
+		esac
 	else
 		printf '  %-16s %s\n' "site" "none (naming=$NAMING, stack=$STACK)"
 	fi
@@ -1560,5 +1868,8 @@ grove_wire() {
           { "type": "command", "command": "grove hook on-edit", "timeout": 300 } ]}
       ]
 EOF
-	printf '\n'
+	printf '\n  That last timeout is a HARD KILL, and it has to outlast the slowest GROVE_POST_CREATE\n'
+	printf '  command — a Magento di:compile outruns 300s comfortably. A build cut off by it shows up\n'
+	printf '  as "BUILD CUT OFF" in grove list; finishing it is `grove provision <name>` in a terminal,\n'
+	printf '  where nothing times out.\n\n'
 }

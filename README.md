@@ -68,7 +68,7 @@ does everything else, then names that one step.
 | | |
 |---|---|
 | `grove create <name>` | branch + worktree + site. No sudo, no prompts. |
-| `grove list` | every worktree: branch, URL, database, idle time |
+| `grove list` | every worktree: branch, URL, database, build state, idle time |
 | `grove info <name>` | paths, URL, database, commits still to land |
 | `grove shell <name> [cmd]` | run in that worktree, inside the container |
 | `grove provision <name>` | give a site-less worktree its site after the fact |

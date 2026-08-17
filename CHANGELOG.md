@@ -1,5 +1,40 @@
 # Changelog
 
+## 0.2.8 — 2026-08-17
+
+A worktree's site is built lazily and takes minutes, so "it has a URL" and "that URL serves
+something" are two different facts — and grove could only report the first. Every reader now
+distinguishes **not built yet / building / ready / failed**, and the marker files they read from say
+which.
+
+- **A failed build reported itself as ready.** The pending marker was cleared whether the build
+  succeeded or not, so `list`, `info` and the worktree's own note all said the site was up for one
+  that had never come up — and the retry silently stopped working, because the next `Edit`/`Write`
+  found no marker and did nothing. The hook's own comment said the marker was kept; the code removed
+  it. It now survives, carrying what failed and when.
+- **`grove list` says which of the four states each worktree is in**, including `site ready` — an
+  uncomplaining row was previously indistinguishable from one whose site state nobody checked. A
+  build in flight shows what it is doing and for how long: `building 4m — post-create: bin/magento
+  setup:di:compile`.
+- **`grove info` adds a `build` line** with the same state plus the remedy, the failure count and the
+  path to the build output.
+- **The worktree's own note (`WORKTREE-SITE.md` / `CLAUDE.local.md`) states the site's state**, so a
+  session that lands in a worktree mid-build is told to wait rather than left to conclude the site is
+  broken.
+- **A killed build is named as one rather than disappearing.** The on-edit hook's timeout is a hard
+  kill and a Magento `di:compile` outruns it comfortably; that left a lock nobody would ever release,
+  which every later build would have found held. A lock whose process is gone now reads as
+  `BUILD CUT OFF`, is broken by the next build, and is logged loudly — the container-side child it
+  spawned outlives the parent and may still be running.
+- **One build at a time, whoever asks.** The lock was taken by the on-edit hook alone, leaving
+  `grove provision` free to start a second seed against the same database while the hook's was still
+  running. It moved into `grove_provision`, where every entry point passes.
+- **Failed builds stop being retried on every edit.** With the marker now surviving, the retry is
+  real — and for a build that fails reproducibly that is minutes per keystroke. Two automatic
+  attempts, then grove says so and names `grove provision <name>`, which is never capped.
+- **`grove wire` says the on-edit timeout has to outlast the slowest `GROVE_POST_CREATE` command**,
+  which is the thing that makes a build get cut off in the first place.
+
 ## 0.2.7 — 2026-08-12
 
 **`grove unpublish` — the inverse of publish, which did not exist.** Tearing two test projects off

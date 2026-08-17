@@ -193,19 +193,13 @@ EOF
 # Nothing here is fatal: a session with no site is degraded, not broken.
 hook_on_edit() {
 	GROVE_TAG="on-edit"; export GROVE_TAG
-	local wt_root marker name
+	local wt_root marker name failures
 	wt_root="${CLAUDE_PROJECT_DIR:-$PWD}"
 	marker="$wt_root/.grove-provision-pending"
 
 	# The common case by far — the main checkout, or a worktree whose site is already built — so it
 	# must be the cheapest possible exit.
 	[ -f "$marker" ] || exit 0
-
-	# Claim the marker BEFORE doing any work: two edits in quick succession would otherwise both start
-	# a seed against the same database. mkdir is the atomic test-and-set.
-	local lock="$wt_root/.grove-provision-lock"
-	mkdir "$lock" 2>/dev/null || exit 0
-	trap 'rmdir "$lock" 2>/dev/null' EXIT
 
 	name="$(basename "$wt_root")"
 	grove_has_site "$name" || { rm -f "$marker"; exit 0; }
@@ -217,15 +211,42 @@ hook_on_edit() {
 		exit 0
 	}
 
-	grove_log "$name: first file change — building the site"
-	if grove_provision "$name" >>"$GROVE_LOG_FILE" 2>&1; then
-		grove_log "$name: site ready at $(grove_wt_url "$name")"
-		printf 'Built this worktree'\''s site on your first file change: %s\n' "$(grove_wt_url "$name")" >&2
-	else
-		# Keep the marker so the next edit retries, and name the manual command rather than leaving
-		# the session to discover a site-less worktree the hard way.
-		grove_log "$name: provisioning failed — retry with: grove provision $name"
-		printf 'Could not build this worktree'\''s site. Retry: grove provision %s\n' "$name" >&2
+	# The marker now SURVIVES a failed build, which is what makes the retry real — and turns "retry on
+	# the next edit" into "retry on every edit". For a build that fails reproducibly that is minutes
+	# of Magento per keystroke, so the automatic attempts are capped and the rest is handed over
+	# deliberately. `grove provision` itself is never capped: that is a human asking.
+	failures="$(grove_build_failures "$name")"
+	if [ "$failures" -ge 2 ]; then
+		grove_log "$name: $failures builds have not finished — not retrying automatically. Run: grove provision $name"
+		printf 'This worktree'\''s site has failed to build %s times; grove has stopped retrying on edits.\n' "$failures" >&2
+		printf 'Run it where nothing times out:  grove provision %s\n' "$name" >&2
+		exit 0
 	fi
+
+	# A cut-off previous attempt is worth naming BEFORE the retry, because the retry is about to break
+	# that build's lock — after which nothing on screen would say a build had ever been killed.
+	[ "$(grove_build_state "$name")" = "interrupted" ] && \
+		grove_log "$name: the previous build was cut off part-way — retrying it"
+
+	grove_log "$name: file change — building the site"
+	grove_provision "$name" >>"$GROVE_LOG_FILE" 2>&1
+
+	# Report the STATE rather than the exit code. They are not the same question: provision returns 0
+	# when another process already holds the build, and the session wants to hear "it is being built"
+	# rather than "done".
+	case "$(grove_build_state "$name")" in
+	ready)
+		grove_log "$name: site ready at $(grove_wt_url "$name")"
+		printf 'Built this worktree'\''s site on your file change: %s\n' "$(grove_wt_url "$name")" >&2
+		;;
+	building)
+		printf 'This worktree'\''s site is already being built by another process — leaving it to finish.\n' >&2
+		;;
+	*)
+		grove_log "$name: provisioning did not finish — retry with: grove provision $name"
+		printf 'Could not build this worktree'\''s site (%s). Retry, where nothing times out:  grove provision %s\n' \
+			"$(grove_build_detail "$name" "$(grove_build_state "$name")")" "$name" >&2
+		;;
+	esac
 	exit 0
 }
